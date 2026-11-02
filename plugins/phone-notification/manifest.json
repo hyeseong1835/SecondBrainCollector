@@ -1,0 +1,88 @@
+{
+  "type": "collector",
+  "id": "phone-notification",
+  "version": "1.0.0",
+  "name": "알림 (안드로이드)",
+  "min_host_version": 1,
+  "platforms": [
+    "android"
+  ],
+  "runtimes": {
+    "js": "main.js"
+  },
+  "capabilities": [
+    {
+      "id": "event:notification",
+      "required": true
+    }
+  ],
+  "settings": [
+    {
+      "key": "exclude_packages",
+      "type": "list",
+      "default": [
+        "dev.hyeseong.lifelog.collector"
+      ],
+      "label": "기록하지 않을 앱(패키지 이름)"
+    }
+  ],
+  "privacy": [
+    {
+      "key": "store_content",
+      "type": "boolean",
+      "default": true,
+      "label": "제목·본문·메시지 내용 저장 (끄면 앱·시각·채널 같은 메타데이터만)"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "notification",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "package": "text",
+        "key": "text",
+        "id": "integer",
+        "tag": "text",
+        "channel": "text",
+        "category": "text",
+        "title": "text",
+        "text": "text",
+        "sub_text": "text",
+        "ongoing": "boolean",
+        "group_key": "text",
+        "group_summary": "boolean",
+        "importance": "integer",
+        "posts": "integer",
+        "removed_reason": "text"
+      },
+      "label": "title",
+      "identity": [
+        "key"
+      ],
+      "index": [
+        "package"
+      ]
+    },
+    {
+      "name": "event",
+      "kind": "event",
+      "schema_version": 1,
+      "columns": {
+        "kind": "text",
+        "key": "text",
+        "package": "text",
+        "reason": "text",
+        "raw": "jsonb"
+      },
+      "label": "kind",
+      "identity": [
+        "key",
+        "kind"
+      ],
+      "index": [
+        "package"
+      ]
+    }
+  ]
+}

@@ -249,7 +249,7 @@ fun PermissionsScreen(model: AppModel) {
         Perm("위치 항상 허용", "화면이 꺼져도 위치 기록", has(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)) { perms.launch(arrayOf(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)) },
         Perm("신체 활동", "포그라운드 health 종류", has(android.Manifest.permission.ACTIVITY_RECOGNITION)) { perms.launch(arrayOf(android.Manifest.permission.ACTIVITY_RECOGNITION)) },
         Perm("사용 정보 접근", "phone-app (앱 사용 구간)", usageOk) { ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) },
-        Perm("알림 접근", "phone-media (재생 중인 미디어)", listenerOk) { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
+        Perm("알림 접근", "phone-media (재생 중인 미디어) · phone-notification (알림)", listenerOk) { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
         Perm("Health Connect", "health · 허용 ${hcGranted ?: "-"}/${HealthSource.PERMISSIONS.size}", when { !HealthSource.available(ctx) -> null; else -> hcGranted == HealthSource.PERMISSIONS.size }) {
             if (HealthSource.available(ctx)) health.launch(HealthSource.PERMISSIONS) else msg = "Health Connect 없음"
         },

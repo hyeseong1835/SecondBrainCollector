@@ -38,7 +38,8 @@
     <application
         android:label="LifeLog 수집기"
         android:icon="@android:drawable/ic_menu_recent_history"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:theme="@android:style/Theme.Material.NoActionBar"
+>
 
         <activity android:name=".ui.MainActivity" android:exported="true">
             <intent-filter>
@@ -60,7 +61,7 @@
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="personal activity logging to the user's own database" />
         </service>
 
-        <!-- 미디어 세션을 읽기 위한 알림 리스너(알림 내용은 읽지 않는다) -->
+        <!-- 알림 리스너: 미디어 세션 조회(phone-media)와 알림 수집(phone-notification). 알림 내용은 phone-notification이 켜져 있을 때만 읽는다 -->
         <service android:name=".sources.MediaListenerService" android:exported="true" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />

@@ -15,7 +15,8 @@ app/src/main/java/dev/hyeseong/lifelog/collector/
   js/JsPlugin.kt    QuickJS 컨텍스트 하나 = 플러그인 하나(quickjs-wrapper 3.2, 16KB 정렬). 프렐류드가 ctx를 만든다. 값은 JSON 문자열로 오간다
   sources/
     Sources.kt      screen(브로드캐스트), location(LocationManager 15분), usage(UsageStatsManager 읽기)
-    MediaSource.kt  media(MediaSessionManager. 알림 접근 권한 필요, 알림 내용은 읽지 않음)
+    MediaSource.kt  media(MediaSessionManager. 알림 접근 권한 필요)
+    NotificationSource.kt notification(NotificationListenerService. 알림 리스너 컴포넌트 MediaListenerService도 여기. posted/removed/snapshot을 extras·랭킹까지 JSON으로)
     HealthSource.kt health(Health Connect 시간 범위 읽기. 지표별로 평탄화만 한다)
   (src/shd|src/noshd)/…/sources/SamsungHealthSource.kt  shealth(삼성 헬스 Data SDK). app/libs/에 aar가 있으면 shd(실제), 없으면 noshd(빈 구현)가 빌드에 들어간다
   CollectorService.kt 포그라운드 서비스 = 호스트. 디스패처(HandlerThread)에서만 JS를 돌린다
@@ -35,7 +36,7 @@ cd collector-android; .\gradlew.bat assembleDebug
 ## 폰에서 설정하는 순서
 1. 노트북에서 기기 비밀번호를 새로 만든다(관리자 접속): `SELECT lifelog.reset_device_password('phone');` (폰 기기는 import가 이미 등록했다).
 2. 앱 열기 → 기기 id `phone`, 호스트·포트·DB, 테넌트(Supabase 세션 풀러면 프로젝트 ref), 비밀번호 → **저장하고 연결 확인**. 비밀번호는 Keystore로 암호화되어 폰에만 남는다.
-3. 권한: **사용 정보 접근**(설정 화면에서 켬), **위치·알림·활동**, **위치 항상 허용**, **Health Connect**(앱별 권한 화면), **알림 접근(미디어)**, **삼성 헬스 SDK**(삼성 헬스 앱 > 설정 > 삼성 헬스 정보 > 버전을 10번 눌러 개발자 모드 > *Developer Mode for Data Read* 켠 뒤 누른다), **배터리 최적화 제외**.
+3. 권한: **사용 정보 접근**(설정 화면에서 켬), **위치·알림·활동**, **위치 항상 허용**, **Health Connect**(앱별 권한 화면), **알림 접근(미디어·알림)**, **삼성 헬스 SDK**(삼성 헬스 앱 > 설정 > 삼성 헬스 정보 > 버전을 10번 눌러 개발자 모드 > *Developer Mode for Data Read* 켠 뒤 누른다), **배터리 최적화 제외**.
 4. **내장 플러그인 전부 등록·켜기**(개발용: 권한 전부 허용. 항목별 허용 UI는 대시보드 몫). 또는 **URL로 설치**: GitHub URL(`https://github.com/소유자/저장소/tree/브랜치/폴더`)을 넣으면 내려받아 `filesDir/plugins/<id>`에 풀고 등록·켠다. 수집 중이면 서비스를 다시 시작한다.
 5. **수집 시작**. 알림에 상태가 보인다. 중지는 열린 구간을 닫고 큐를 한 번 비운 뒤 끝난다.
 
@@ -46,6 +47,7 @@ cd collector-android; .\gradlew.bat assembleDebug
 | phone-location | event:location | point(시점, lat/lon/accuracy) | 15분 간격 균형 전력. 좌표만, 장소 판정 없음 |
 | phone-app | read:usage + timer | app(구간, package) | 15분마다 UsageEvents를 읽어 resumed→paused를 구간으로. 1분 미만은 버림 |
 | phone-media | event:media | media(구간, package/title/artist/album/duration_ms) | 세션별 재생 중 구간. 곡이 바뀌면 새 구간 |
+| phone-notification | event:notification | event(시점, kind posted/removed/snapshot, reason, raw jsonb = 얻을 수 있는 전부), notification(구간, 알림 하나가 떠 있던 동안. package/key/channel/category/title/text/sub_text/ongoing/group/importance/posts/removed_reason) | 알림 리스너. `exclude_packages`(기본 수집기 자신), `store_content`(끄면 제목·본문·메시지·사람을 빼고 메타데이터만) |
 | health | read:health (+read:shealth) + timer | span(metric/value/category/extra), point(metric/value/unit) | 1시간마다 지난 2일을 다시 읽는다. 같은 레코드는 id가 같아 덮어씀 |
 
 health 지표: steps(시간별 `hourly`)·steps/distance/active_kcal/total_kcal/floors/resting_heart_rate(일별 `daily`)·sleep(구간, extra.stages_min)·sleep_stage(category deep/light/rem/awake)·exercise(category 제목)·heart_rate/spo2/hrv/body_temp/weight(시점). `metrics` 설정으로 고른다(기본 steps, heart_rate, sleep).

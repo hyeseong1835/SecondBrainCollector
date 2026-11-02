@@ -10,16 +10,12 @@ import android.media.session.PlaybackState
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
-import android.service.notification.NotificationListenerService
 import org.json.JSONObject
 import java.time.Instant
 
-/** 알림 접근 권한을 받기 위한 빈 리스너. MediaSessionManager.getActiveSessions가 이 컴포넌트를 요구한다. */
-class MediaListenerService : NotificationListenerService()
-
 /**
  * 미디어 세션. 세션·메타데이터·재생 상태가 바뀔 때 { time, package, title, artist, album, duration_ms, playing }을 낸다.
- * 같은 값이 이어지면 내지 않는다. 세션이 사라지면 playing=false를 한 번 낸다. 설정 > 알림 접근 허용이 필요하다.
+ * 같은 값이 이어지면 내지 않는다. 세션이 사라지면 playing=false를 한 번 낸다. 설정 > 알림 접근 허용이 필요하다(리스너 컴포넌트는 NotificationSource.kt의 MediaListenerService).
  */
 class MediaSource(private val context: Context) : EventSource {
     override val id = "media"
