@@ -41,7 +41,9 @@ public partial class MainWindow : Window
             var argv = Environment.GetCommandLineArgs();
             if (Array.IndexOf(argv, "--plugins-dir") is var pd && pd >= 0 && pd + 1 < argv.Length) Bridge.PluginsDir = argv[pd + 1];   // 개발용
             if (Array.IndexOf(argv, "--size") is var sz && sz >= 0 && sz + 1 < argv.Length && argv[sz + 1].Split('x') is [var sw, var sh]) { Width = double.Parse(sw); Height = double.Parse(sh); }   // 개발용: 창 크기
-            var env = await CoreWebView2Environment.CreateAsync(null, Path.Combine(Config.Dir, "webview2"));
+            // 개발용: --user-data-dir 경로 → WebView2 프로필 폴더를 바꾼다. 같은 프로필을 쓰는 인스턴스끼리는 브라우저 프로세스를 공유해 가상 호스트 매핑이 섞인다
+            var udi = Array.IndexOf(argv, "--user-data-dir");
+            var env = await CoreWebView2Environment.CreateAsync(null, udi >= 0 && udi + 1 < argv.Length ? argv[udi + 1] : Path.Combine(Config.Dir, "webview2"));
             await Web.EnsureCoreWebView2Async(env);
             var core = Web.CoreWebView2;
             core.Settings.IsWebMessageEnabled = true;

@@ -30,13 +30,14 @@ const DEFAULT_WIDGETS = [
   { type: "widget-category-tree", x: 5, y: 15, w: 5, h: 5 },
   { type: "widget-heart-rate", x: 10, y: 15, w: 5, h: 5 },
   { type: "widget-stress", x: 15, y: 15, w: 5, h: 5 },
+  { type: "widget-notifications", x: 0, y: 20, w: 10, h: 6 },
 ];
 const defaultWidgets = () => DEFAULT_WIDGETS.map(w => Object.assign({ id: uid(), settings: {} }, w));
 const DEFAULT_VIEWS = [{ id: "default", name: "기본", widgets: DEFAULT_WIDGETS.map((w, i) => Object.assign({ id: "w" + (i + 1), settings: {} }, w)) }];
 // 휴대폰 첫 화면: 한 줄로 쌓이므로 순서대로 y만 늘린다
 const column = list => { let y = 0; return list.map((w, i) => { const o = Object.assign({ id: "m" + (i + 1), x: 0, y, w: 5, settings: {} }, w); y += o.h; return o; }); };
 const DEFAULT_MOBILE_VIEWS = [
-  { id: "today", name: "오늘", widgets: column([{ type: "widget-summary", h: 4 }, { type: "widget-categories", h: 5 }, { type: "widget-top-apps", h: 5 }, { type: "widget-hourly", h: 4 }, { type: "widget-location", h: 5 }, { type: "widget-media", h: 4 }]) },
+  { id: "today", name: "오늘", widgets: column([{ type: "widget-summary", h: 4 }, { type: "widget-categories", h: 5 }, { type: "widget-top-apps", h: 5 }, { type: "widget-hourly", h: 4 }, { type: "widget-location", h: 5 }, { type: "widget-media", h: 4 }, { type: "widget-notifications", h: 6 }]) },
   { id: "health", name: "건강", widgets: column([{ type: "widget-shealth", h: 4 }, { type: "widget-sleep", h: 5 }, { type: "widget-steps", h: 4 }, { type: "widget-heart-rate", h: 4 }, { type: "widget-activity", h: 3 }, { type: "widget-energy-score", h: 4 }]) },
 ];
 

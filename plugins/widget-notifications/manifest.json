@@ -1,0 +1,48 @@
+{
+  "type": "renderer",
+  "id": "widget-notifications",
+  "version": "1.0.0",
+  "name": "알림",
+  "description": "휴대폰 알림: 앱별 알림 수, 시간대별 알림 수, 알림 목록(시각·앱·제목·본문·제거 이유)",
+  "min_host_version": 1,
+  "runtimes": {
+    "webview": "index.html"
+  },
+  "slot": "card",
+  "inputs": [
+    "phone-notification/notification@1",
+    "phone-notification/event@1"
+  ],
+  "settings": [
+    {
+      "key": "apps",
+      "type": "number",
+      "default": 8,
+      "label": "앱 막대 개수"
+    },
+    {
+      "key": "limit",
+      "type": "number",
+      "default": 50,
+      "label": "목록 개수"
+    },
+    {
+      "key": "ongoing",
+      "type": "boolean",
+      "default": false,
+      "label": "지속 알림 포함 (음악 재생·실행 중 서비스 등)"
+    },
+    {
+      "key": "summaries",
+      "type": "boolean",
+      "default": false,
+      "label": "묶음 요약 알림 포함"
+    },
+    {
+      "key": "device",
+      "type": "string",
+      "default": "",
+      "label": "기기 (비우면 전부)"
+    }
+  ]
+}

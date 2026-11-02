@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<style>
+  :root { --fg:#ddd; --mute:#888; --dur:#aaa; --bar-fg:#000; --line:#2a2a2a; --bar:#fc6; color-scheme: dark; }
+  :root[data-theme="light"] { --fg:#1c1c1e; --mute:#6b6b70; --dur:#555; --line:#dcdce0; --bar:#e9a800; color-scheme: light; }
+  body { margin:0; padding:8px 12px; font: 12px/1.4 "Segoe UI Variable", "Segoe UI", sans-serif; color:var(--fg); background:transparent; }
+  h3 { margin:10px 0 4px; font-size:11px; font-weight:600; color:var(--mute); }
+  h3:first-child { margin-top:0; }
+  .row { display:grid; grid-template-columns: 1fr 44px; align-items:center; gap:8px; margin:3px 0; }
+  .bar { height:16px; border-radius:3px; display:flex; align-items:center; padding:0 5px; color:var(--bar-fg); font-size:11px; white-space:nowrap; overflow:hidden; min-width:2px; }
+  .n { text-align:right; color:var(--dur); font-variant-numeric: tabular-nums; }
+  .chart { display:grid; grid-template-columns: repeat(24, 1fr); gap:3px; align-items:end; height:70px; }
+  .col { display:flex; flex-direction:column; justify-content:flex-end; height:100%; }
+  .col div { background:var(--bar); border-radius:2px 2px 0 0; }
+  .labels { display:grid; grid-template-columns: repeat(24, 1fr); color:var(--mute); text-align:center; margin-top:3px; font-size:10px; }
+  table { border-collapse:collapse; width:100%; }
+  td { padding:2px 6px 2px 0; vertical-align:top; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; }
+  td.t { color:var(--mute); font-variant-numeric: tabular-nums; }
+  td.a { color:var(--dur); }
+  td.x { color:var(--mute); max-width:320px; }
+  td.r { color:var(--mute); font-size:11px; }
+  .mute { color:var(--mute); }
+</style></head>
+<body><div id="root" class="mute">불러오는 중…</div>
+<script src="https://app.lifelog/sdk.js"></script>
+<script>
+const S = LifeLogSdk;
+async function q(view, opts) { try { return (await lifelog.query(view, opts)).rows; } catch (e) { return []; } }
+// NotificationListenerService.REASON_* 이름(수집기가 reason 열에 넣는 것) → 짧은 한글
+const REASON = { click: "눌러서", cancel: "지움", cancel_all: "모두 지움", error: "오류", package_changed: "앱 변경", user_stopped: "앱 중지", package_banned: "앱 차단",
+  app_cancel: "앱이 지움", app_cancel_all: "앱이 모두 지움", listener_cancel: "리스너", listener_cancel_all: "리스너", group_summary_canceled: "묶음 지움",
+  group_optimization: "묶음 정리", package_suspended: "앱 일시정지", profile_turned_off: "프로필 꺼짐", unautobundled: "묶음 해제", channel_banned: "채널 차단",
+  snoozed: "다시 알림", timeout: "시간 지남", channel_removed: "채널 삭제", clear_data: "데이터 삭제", assistant_cancel: "어시스턴트", lockdown: "잠금" };
+const appName = p => String(p || "?").split(".").slice(-1)[0];
+
+lifelog.ready(async (range, widget) => {
+  const st = widget.settings || {};
+  const apps = Number(st.apps) || 8, limit = Number(st.limit) || 50;
+  const root = document.getElementById("root");
+  const opts = { range, limit: 20000 }; if (st.device) opts.device = st.device;
+  const [noti, ev] = await Promise.all([q("phone-notification/notification", opts), q("phone-notification/event", Object.assign({}, opts, { where: { kind: "posted" } }))]);
+  const S0 = S.ms(range.start), E0 = S.ms(range.end);
+  // 이 하루에 뜬 알림만(start가 범위 안). 어제부터 떠 있던 지속 알림은 세지 않는다
+  const rows = noti.map(r => Object.assign({}, r, { s: S.ms(r.start), e: S.ms(r.end) }))
+    .filter(r => r.s >= S0 && r.s < E0)
+    .filter(r => (st.ongoing || !r.ongoing) && (st.summaries || !r.group_summary))
+    .sort((a, b) => b.s - a.s);
+  if (rows.length === 0) {
+    root.innerHTML = '<span class="mute">알림 기록 없음' + (noti.length ? ' (지속·묶음 요약 알림만 있음. 설정에서 포함할 수 있음)' : '') + '</span>';
+    return;
+  }
+  root.className = "";
+
+  // (1) 앱별 알림 수
+  const byApp = new Map();
+  for (const r of rows) byApp.set(r.package, (byApp.get(r.package) || 0) + 1);
+  const groups = [...byApp].map(([k, n]) => ({ key: k, n })).sort((a, b) => b.n - a.n);
+  const max = groups[0].n;
+  const barsHtml = groups.slice(0, apps).map(g => `<div class="row" title="${S.esc(g.key)} ${g.n}개">
+    <div class="bar" style="width:${Math.max(2, g.n / max * 100)}%;background:${S.hashColor(appName(g.key))}">${S.esc(appName(g.key))}</div><div class="n">${g.n}</div></div>`).join("") +
+    (groups.length > apps ? `<div class="mute">… 앱 ${groups.length - apps}개 더</div>` : "");
+
+  // (2) 시간대별 알림 수(하루 시작부터 24칸)
+  const hours = []; for (let h = S0; h < E0; h += 3600e3) hours.push({ h, n: 0 });
+  for (const r of rows) { const i = Math.floor((r.s - S0) / 3600e3); if (hours[i]) hours[i].n++; }
+  const hmax = Math.max(1, ...hours.map(b => b.n));
+  const hourHtml = `<div class="chart">${hours.map(b => `<div class="col" title="${S.fmtTime(b.h)}  ${b.n}개"><div style="height:${b.n / hmax * 100}%"></div></div>`).join("")}</div>
+    <div class="labels">${hours.map((b, i) => i % 3 === 0 ? `<span>${S.fmtTime(b.h).slice(0, 2)}</span>` : "<span></span>").join("")}</div>`;
+
+  // (3) 목록: 시각·앱·제목·본문·제거 이유. 제거 이유가 없고 end가 최근(지금 또는 하루 끝 근처)이면 아직 떠 있는 것: "표시 중". 수집기가 멈추며 닫힌 것은 이유도 없고 end도 오래라 빈칸
+  const openSince = Math.min(E0, Date.now()) - 10 * 60e3;
+  const reasonOf = r => r.removed_reason ? (REASON[r.removed_reason] || r.removed_reason) : (r.e >= openSince ? "표시 중" : "");
+  const listHtml = `<table>${rows.slice(0, limit).map(r => `<tr title="${S.esc(r.package)}${r.channel ? " · " + S.esc(r.channel) : ""}${r.posts > 1 ? " · " + r.posts + "번 갱신" : ""} · 떠 있던 시간 ${S.fmtDur(r.e - r.s)}">
+    <td class="t">${S.fmtTime(r.s)}</td><td class="a">${S.esc(appName(r.package))}</td><td>${S.esc(r.title || "")}</td><td class="x">${S.esc(r.text || r.sub_text || "")}</td><td class="r">${S.esc(reasonOf(r))}</td></tr>`).join("")}</table>` +
+    (rows.length > limit ? `<div class="mute">… ${rows.length - limit}개 더</div>` : "");
+
+  const posts = ev.filter(e => S.ms(e.time) >= S0 && S.ms(e.time) < E0).length;
+  root.innerHTML = `<h3>앱별 알림 수 · 합계 ${rows.length}개${posts > rows.length ? ` (갱신 포함 ${posts}회)` : ""}</h3>${barsHtml}
+    <h3>시간대별</h3>${hourHtml}
+    <h3>알림 목록</h3>${listHtml}`;
+});
+</script></body></html>
