@@ -47,7 +47,7 @@ cd collector-android; .\gradlew.bat assembleDebug
 | phone-location | event:location | point(시점, lat/lon/accuracy) | 15분 간격 균형 전력. 좌표만, 장소 판정 없음 |
 | phone-app | read:usage + timer | app(구간, package) | 15분마다 UsageEvents를 읽어 resumed→paused를 구간으로. 1분 미만은 버림 |
 | phone-media | event:media | media(구간, package/title/artist/album/duration_ms) | 세션별 재생 중 구간. 곡이 바뀌면 새 구간 |
-| phone-notification | event:notification | event(시점, kind posted/removed/snapshot, reason, raw jsonb = 얻을 수 있는 전부), notification(구간, 알림 하나가 떠 있던 동안. package/key/channel/category/title/text/sub_text/ongoing/group/importance/posts/removed_reason) | 알림 리스너. `exclude_packages`(기본 수집기 자신), `store_content`(끄면 제목·본문·메시지·사람을 빼고 메타데이터만) |
+| phone-notification | event:notification | event(시점, kind posted/removed/snapshot, reason, raw jsonb = 얻을 수 있는 전부), notification(구간, 알림 하나가 떠 있던 동안. package/key/notif_id/channel/category/title/text/sub_text/ongoing/group/importance/posts/removed_reason) | 알림 리스너. `exclude_packages`(기본 수집기 자신), `store_content`(끄면 제목·본문·메시지·사람을 빼고 메타데이터만) |
 | health | read:health (+read:shealth) + timer | span(metric/value/category/extra), point(metric/value/unit) | 1시간마다 지난 2일을 다시 읽는다. 같은 레코드는 id가 같아 덮어씀 |
 
 health 지표: steps(시간별 `hourly`)·steps/distance/active_kcal/total_kcal/floors/resting_heart_rate(일별 `daily`)·sleep(구간, extra.stages_min)·sleep_stage(category deep/light/rem/awake)·exercise(category 제목)·heart_rate/spo2/hrv/body_temp/weight(시점). `metrics` 설정으로 고른다(기본 steps, heart_rate, sleep).

@@ -20,7 +20,7 @@ function summary(ev, content) {
   const n = ev.notification || {}, x = n.extras || {};
   const str = v => (v == null ? null : String(v));
   return {
-    package: ev.package, key: ev.key, id: ev.id, tag: ev.tag, channel: n.channel_id, category: n.category,
+    package: ev.package, key: ev.key, notif_id: ev.id, tag: ev.tag, channel: n.channel_id, category: n.category,
     title: content ? str(x["android.title"]) : null, text: content ? str(x["android.text"]) : null, sub_text: content ? str(x["android.subText"]) : null,
     ongoing: !!ev.ongoing, group_key: ev.group_key, group_summary: ((n.flags || 0) & 0x200) !== 0,
     importance: ev.ranking ? ev.ranking.importance : null

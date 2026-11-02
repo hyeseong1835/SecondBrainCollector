@@ -42,7 +42,7 @@
       "columns": {
         "package": "text",
         "key": "text",
-        "id": "integer",
+        "notif_id": "integer",
         "tag": "text",
         "channel": "text",
         "category": "text",
