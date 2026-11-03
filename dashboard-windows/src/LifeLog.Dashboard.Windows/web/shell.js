@@ -38,6 +38,7 @@ const NETWORK_WIDGETS = [
   { type: "widget-signal", x: 10, y: 0, w: 10, h: 6 },
   { type: "widget-wifi", x: 0, y: 6, w: 10, h: 6 },
   { type: "widget-cellular", x: 10, y: 6, w: 10, h: 6 },
+  { type: "widget-bluetooth", x: 0, y: 12, w: 10, h: 6 },
 ];
 const DEFAULT_VIEWS = [
   { id: "default", name: "기본", widgets: DEFAULT_WIDGETS.map((w, i) => Object.assign({ id: "w" + (i + 1), settings: {} }, w)) },
@@ -48,7 +49,7 @@ const column = list => { let y = 0; return list.map((w, i) => { const o = Object
 const DEFAULT_MOBILE_VIEWS = [
   { id: "today", name: "오늘", widgets: column([{ type: "widget-summary", h: 4 }, { type: "widget-categories", h: 5 }, { type: "widget-top-apps", h: 5 }, { type: "widget-hourly", h: 4 }, { type: "widget-location", h: 5 }, { type: "widget-media", h: 4 }, { type: "widget-notifications", h: 6 }]) },
   { id: "health", name: "건강", widgets: column([{ type: "widget-shealth", h: 4 }, { type: "widget-sleep", h: 5 }, { type: "widget-steps", h: 4 }, { type: "widget-heart-rate", h: 4 }, { type: "widget-activity", h: 3 }, { type: "widget-energy-score", h: 4 }]) },
-  { id: "network", name: "네트워크", widgets: column([{ type: "widget-internet", h: 6 }, { type: "widget-wifi", h: 6 }, { type: "widget-cellular", h: 5 }, { type: "widget-signal", h: 6 }]) },
+  { id: "network", name: "네트워크", widgets: column([{ type: "widget-internet", h: 6 }, { type: "widget-wifi", h: 6 }, { type: "widget-cellular", h: 5 }, { type: "widget-signal", h: 6 }, { type: "widget-bluetooth", h: 6 }]) },
 ];
 
 function dayRange(offset) {

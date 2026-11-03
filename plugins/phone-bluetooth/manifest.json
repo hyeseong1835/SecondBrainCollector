@@ -1,0 +1,88 @@
+{
+  "type": "collector",
+  "id": "phone-bluetooth",
+  "version": "1.0.0",
+  "name": "블루투스 (안드로이드)",
+  "min_host_version": 1,
+  "platforms": [
+    "android"
+  ],
+  "runtimes": {
+    "js": "main.js"
+  },
+  "capabilities": [
+    {
+      "id": "event:bluetooth",
+      "required": true
+    },
+    {
+      "id": "timer",
+      "required": true
+    }
+  ],
+  "privacy": [
+    {
+      "key": "store_address",
+      "type": "boolean",
+      "default": true,
+      "label": "기기 MAC 주소 저장 (끄면 이름만. 이름이 같은 기기는 구분하지 못한다)"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "connection",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "address": "text",
+        "name": "text",
+        "kind": "text",
+        "device_type": "text",
+        "major_class": "text",
+        "device_class": "integer",
+        "transports": "text",
+        "profiles": "text",
+        "battery_start": "integer",
+        "battery_end": "integer"
+      },
+      "label": "name",
+      "identity": [
+        "address",
+        "name"
+      ],
+      "index": [
+        "address"
+      ]
+    },
+    {
+      "name": "audio",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "connection_id": "text",
+        "address": "text",
+        "name": "text"
+      },
+      "label": "name",
+      "identity": [
+        "address",
+        "name"
+      ],
+      "index": [
+        "connection_id"
+      ]
+    },
+    {
+      "name": "adapter",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "state": "text"
+      },
+      "label": "state",
+      "identity": [
+        "state"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "type": "renderer",
+  "id": "widget-bluetooth",
+  "version": "1.0.0",
+  "name": "블루투스",
+  "description": "휴대폰 블루투스 연결: 기기별 연결 시간·소리 재생 시간, 기기별 하루 타임라인, 연결 목록(시각·종류·프로필·배터리)",
+  "min_host_version": 1,
+  "runtimes": {
+    "webview": "index.html"
+  },
+  "slot": "card",
+  "inputs": [
+    "phone-bluetooth/connection@1",
+    "phone-bluetooth/audio@1",
+    "phone-bluetooth/adapter@1"
+  ],
+  "settings": [
+    {
+      "key": "devices",
+      "type": "number",
+      "default": 6,
+      "label": "타임라인 기기 수"
+    },
+    {
+      "key": "limit",
+      "type": "number",
+      "default": 30,
+      "label": "목록 개수"
+    },
+    {
+      "key": "device",
+      "type": "string",
+      "default": "",
+      "label": "기기 (비우면 전부)"
+    }
+  ]
+}

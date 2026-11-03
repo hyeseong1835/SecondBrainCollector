@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<style>
+  :root { --fg:#ddd; --mute:#888; --dur:#aaa; --bar-fg:#000; --line:#2a2a2a; --track:#262626; --warn:#e98; color-scheme: dark; }
+  :root[data-theme="light"] { --fg:#1c1c1e; --mute:#6b6b70; --dur:#555; --line:#dcdce0; --track:#ececef; --warn:#c44; color-scheme: light; }
+  body { margin:0; padding:8px 12px; font: 12px/1.4 "Segoe UI Variable", "Segoe UI", sans-serif; color:var(--fg); background:transparent; }
+  h3 { margin:10px 0 4px; font-size:11px; font-weight:600; color:var(--mute); }
+  h3:first-child { margin-top:0; }
+  .row { display:grid; grid-template-columns: 1fr 120px; align-items:center; gap:8px; margin:3px 0; }
+  .bar { position:relative; height:16px; border-radius:3px; display:flex; align-items:center; padding:0 5px; color:var(--bar-fg); font-size:11px; white-space:nowrap; overflow:hidden; min-width:2px; }
+  .bar i { position:absolute; left:0; top:0; bottom:0; background:rgba(0,0,0,.22); }
+  .bar span { position:relative; }
+  .n { text-align:right; color:var(--dur); font-variant-numeric: tabular-nums; }
+  .n small { color:var(--mute); }
+  .lane { display:grid; grid-template-columns: 84px 1fr; gap:8px; align-items:center; margin:3px 0; }
+  .lane > span { color:var(--mute); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .track { position:relative; height:14px; background:var(--track); border-radius:3px; overflow:hidden; }
+  .seg { position:absolute; top:0; bottom:0; min-width:1px; opacity:.45; }
+  .seg.a { opacity:1; top:3px; bottom:3px; }
+  .seg.off { opacity:1; background:repeating-linear-gradient(135deg, var(--mute) 0 2px, transparent 2px 6px); }
+  .labels { display:flex; justify-content:space-between; color:var(--mute); margin:3px 0 0 92px; font-size:10px; font-variant-numeric: tabular-nums; }
+  table { border-collapse:collapse; width:100%; }
+  td { padding:2px 6px 2px 0; vertical-align:top; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; }
+  td.t, td.d { color:var(--mute); font-variant-numeric: tabular-nums; }
+  td.x { color:var(--mute); font-size:11px; }
+  .warn { color:var(--warn); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+  .mute { color:var(--mute); }
+</style></head>
+<body><div id="root" class="mute">불러오는 중…</div>
+<script src="https://app.lifelog/sdk.js"></script>
+<script>
+const S = LifeLogSdk;
+async function q(view, opts) { try { return (await lifelog.query(view, opts)).rows; } catch (e) { return []; } }
+const KIND = { headset: "헤드셋", headphones: "헤드폰", handsfree: "핸즈프리", speaker: "스피커", car: "차량", tv: "TV", audio: "오디오", watch: "워치", wearable: "웨어러블",
+  phone: "휴대폰", computer: "컴퓨터", keyboard: "키보드", mouse: "마우스", input: "입력 장치", health: "건강 기기", other: "기타" };
+const PROFILE = { a2dp: "음악", headset: "통화", le_audio: "LE 오디오", hearing_aid: "보청기", hid: "입력", pan: "테더링" };
+// 주소를 저장하지 않으면(store_address 끔) 이름으로 묶는다
+const key = r => r.address || r.name || "?";
+const name = r => r.name || r.address || "(이름 모름)";
+const battery = r => r.battery_end == null ? "" : r.battery_start != null && r.battery_start !== r.battery_end ? `🔋${r.battery_start}→${r.battery_end}%` : `🔋${r.battery_end}%`;
+
+lifelog.ready(async (range, widget) => {
+  const st = widget.settings || {};
+  const lanes = Number(st.devices) || 6, limit = Number(st.limit) || 30;
+  const root = document.getElementById("root");
+  const opts = { range, limit: 5000 }; if (st.device) opts.device = st.device;
+  const S0 = S.ms(range.start), E0 = S.ms(range.end), span = E0 - S0;
+  // 열린 구간은 end가 비어 있을 수 있다 → 지금(또는 하루 끝)까지로
+  const now = Math.min(Date.now(), E0);
+  const fix = rows => S.clip(rows.map(r => Object.assign({}, r, { open: !r.end, end: r.end || new Date(now).toISOString() })), range.start, range.end);
+  const [conns, audios, adapters] = await Promise.all(["connection", "audio", "adapter"].map(o => q("phone-bluetooth/" + o, opts)));
+  const rows = fix(conns).sort((a, b) => b.s - a.s);
+  const plays = fix(audios), off = fix(adapters).filter(r => r.state === "off");
+  if (rows.length === 0) { root.innerHTML = `<span class="mute">블루투스 연결 기록 없음${off.length ? ` · 꺼져 있던 시간 ${S.fmtDur(S.sumMs(off))}` : ""}</span>`; return; }
+  root.className = "";
+
+  // 기기별: 연결 시간(겹치는 구간은 한 번만), 소리 재생 시간, 이름·종류는 가장 최근 연결 것
+  const latest = new Map(); for (const r of rows) if (!latest.has(key(r))) latest.set(key(r), r);
+  const merged = S.merge(rows, key, 0), mergedAudio = S.merge(plays, key, 0);
+  const audioMs = new Map(S.groupSum(mergedAudio, key).map(g => [g.key, g.ms]));
+  const groups = S.groupSum(merged, key).sort((a, b) => b.ms - a.ms);
+  const max = groups[0].ms;
+  const color = k => S.hashColor(k);
+
+  // (1) 기기별 연결 시간. 막대 안의 어두운 부분이 소리가 나간 시간
+  const barsHtml = groups.map(g => {
+    const r = latest.get(g.key), a = audioMs.get(g.key) || 0;
+    return `<div class="row" title="${S.esc(name(r))} · ${KIND[r.kind] || r.kind || ""} · 연결 ${S.fmtDur(g.ms)} (${g.n}번)${a ? " · 소리 " + S.fmtDur(a) : ""}">
+      <div class="bar" style="width:${Math.max(2, g.ms / max * 100)}%;background:${color(g.key)}"><i style="width:${a / g.ms * 100}%"></i><span>${S.esc(name(r))}</span></div>
+      <div class="n">${a ? `<small>♪${S.fmtDur(a)}</small> ` : ""}${S.fmtDur(g.ms)}</div></div>`;
+  }).join("");
+
+  // (2) 기기별 타임라인: 옅은 색 = 연결, 진한 색 = 소리 재생. 맨 위 줄의 빗금은 블루투스가 꺼져 있던 동안
+  const seg = (r, cls, c) => `<div class="seg ${cls}" title="${S.esc(name(r))} ${S.fmtTime(r.s)}–${S.fmtTime(r.e)} (${S.fmtDur(r.e - r.s)})"
+    style="left:${(r.s - S0) / span * 100}%;width:${(r.e - r.s) / span * 100}%;${c ? "background:" + c : ""}"></div>`;
+  const offLane = off.length ? `<div class="lane"><span>꺼짐</span><div class="track">${off.map(r => `<div class="seg off" title="꺼짐 ${S.fmtTime(r.s)}–${S.fmtTime(r.e)} (${S.fmtDur(r.e - r.s)})"
+    style="left:${(r.s - S0) / span * 100}%;width:${(r.e - r.s) / span * 100}%"></div>`).join("")}</div></div>` : "";
+  const laneHtml = offLane + groups.slice(0, lanes).map(g => `<div class="lane"><span title="${S.esc(name(latest.get(g.key)))}">${S.esc(name(latest.get(g.key)))}</span><div class="track">
+    ${merged.filter(r => key(r) === g.key).map(r => seg(r, "", color(g.key))).join("")}${mergedAudio.filter(r => key(r) === g.key).map(r => seg(r, "a", color(g.key))).join("")}</div></div>`).join("") +
+    (groups.length > lanes ? `<div class="mute">… 기기 ${groups.length - lanes}개 더</div>` : "");
+  const ticks = [0, 6, 12, 18, 24].map(h => `<span>${S.fmtTime(S0 + h * 3600e3)}</span>`).join("");
+
+  // (3) 목록: 시작–끝, 기기, 시간, 종류, 프로필, 배터리
+  const listHtml = `<table>${rows.slice(0, limit).map(r => {
+    const profiles = (r.profiles || "").split(",").filter(Boolean).map(p => PROFILE[p] || p).join("·");
+    return `<tr title="${S.esc([r.address, r.device_type, r.transports].filter(Boolean).join(" · "))}">
+      <td class="t">${S.fmtTime(r.s)}–${r.open ? "지금" : S.fmtTime(r.e)}</td><td><span class="dot" style="background:${color(key(r))}"></span>${S.esc(name(r))}</td>
+      <td class="d">${S.fmtDur(r.e - r.s)}</td><td class="x">${S.esc(KIND[r.kind] || r.kind || "")}</td><td class="x">${S.esc(profiles)}</td><td class="x">${battery(r)}</td></tr>`;
+  }).join("")}</table>` + (rows.length > limit ? `<div class="mute">… ${rows.length - limit}개 더</div>` : "");
+
+  const total = S.sumMs(S.merge(rows, () => "", 0)), totalAudio = S.sumMs(S.merge(plays, () => "", 0));
+  root.innerHTML = `<h3>기기별 연결 시간 · 합계 ${S.fmtDur(total)}${totalAudio ? ` · 소리 ${S.fmtDur(totalAudio)}` : ""}</h3>${barsHtml}
+    <h3>타임라인</h3>${laneHtml}<div class="labels">${ticks}</div>
+    <h3>연결 목록</h3>${listHtml}`;
+});
+</script></body></html>

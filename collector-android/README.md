@@ -18,6 +18,7 @@ app/src/main/java/dev/hyeseong/lifelog/collector/
     MediaSource.kt  media(MediaSessionManager. 알림 접근 권한 필요)
     NotificationSource.kt notification(NotificationListenerService. 알림 리스너 컴포넌트 MediaListenerService도 여기. posted/removed/snapshot을 extras·랭킹까지 JSON으로)
     NetworkSource.kt network(ConnectivityManager 콜백 + TelephonyCallback. 연결 connected/changed/lost, 기본 경로 default, 신호 signal. SSID·BSSID는 위치 권한 필요)
+    BluetoothSource.kt bluetooth(시스템 브로드캐스트. 어댑터 adapter, 링크 acl, 프로필 profile, A2DP 재생 playing, 배터리 battery. 시작할 때 이미 연결된 기기는 snapshot. 근처 기기 권한 필요)
     HealthSource.kt health(Health Connect 시간 범위 읽기. 지표별로 평탄화만 한다)
   (src/shd|src/noshd)/…/sources/SamsungHealthSource.kt  shealth(삼성 헬스 Data SDK). app/libs/에 aar가 있으면 shd(실제), 없으면 noshd(빈 구현)가 빌드에 들어간다
   CollectorService.kt 포그라운드 서비스 = 호스트. 디스패처(HandlerThread)에서만 JS를 돌린다
@@ -37,7 +38,7 @@ cd collector-android; .\gradlew.bat assembleDebug
 ## 폰에서 설정하는 순서
 1. 노트북에서 기기 비밀번호를 새로 만든다(관리자 접속): `SELECT lifelog.reset_device_password('phone');` (폰 기기는 import가 이미 등록했다).
 2. 앱 열기 → 기기 id `phone`, 호스트·포트·DB, 테넌트(Supabase 세션 풀러면 프로젝트 ref), 비밀번호 → **저장하고 연결 확인**. 비밀번호는 Keystore로 암호화되어 폰에만 남는다.
-3. 권한: **사용 정보 접근**(설정 화면에서 켬), **위치·알림·활동**, **위치 항상 허용**, **Health Connect**(앱별 권한 화면), **알림 접근(미디어·알림)**, **삼성 헬스 SDK**(삼성 헬스 앱 > 설정 > 삼성 헬스 정보 > 버전을 10번 눌러 개발자 모드 > *Developer Mode for Data Read* 켠 뒤 누른다), **배터리 최적화 제외**.
+3. 권한: **사용 정보 접근**(설정 화면에서 켬), **위치·알림·활동·근처 기기**, **위치 항상 허용**, **Health Connect**(앱별 권한 화면), **알림 접근(미디어·알림)**, **삼성 헬스 SDK**(삼성 헬스 앱 > 설정 > 삼성 헬스 정보 > 버전을 10번 눌러 개발자 모드 > *Developer Mode for Data Read* 켠 뒤 누른다), **배터리 최적화 제외**.
 4. **내장 플러그인 전부 등록·켜기**(개발용: 권한 전부 허용. 항목별 허용 UI는 대시보드 몫). 또는 **URL로 설치**: GitHub URL(`https://github.com/소유자/저장소/tree/브랜치/폴더`)을 넣으면 내려받아 `filesDir/plugins/<id>`에 풀고 등록·켠다. 수집 중이면 서비스를 다시 시작한다.
 5. **수집 시작**. 알림에 상태가 보인다. 중지는 열린 구간을 닫고 큐를 한 번 비운 뒤 끝난다.
 
@@ -50,6 +51,7 @@ cd collector-android; .\gradlew.bat assembleDebug
 | phone-media | event:media | media(구간, package/title/artist/album/duration_ms) | 세션별 재생 중 구간. 곡이 바뀌면 새 구간 |
 | phone-notification | event:notification | event(시점, kind posted/removed/snapshot, reason, raw jsonb = 얻을 수 있는 전부), notification(구간, 알림 하나가 떠 있던 동안. package/key/notif_id/channel/category/title/text/sub_text/ongoing/group/importance/posts/removed_reason) | 알림 리스너. `exclude_packages`(기본 수집기 자신), `store_content`(끄면 제목·본문·메시지·사람을 빼고 메타데이터만) |
 | phone-network | event:network + timer | wifi(구간, SSID 하나에 붙어 있던 동안. ssid/bssid/frequency_mhz/band/standard/security/link_speed_mbps/validated/metered/ip/gateway/roams), cellular(구간, 모바일 네트워크 연결 전부. carrier/sim_slot/rat/roaming/validated/metered/ip/internet/purpose(internet·ims·mms·emergency…). 망 종류가 바뀌어 1분 넘게 가면 새 구간. @1은 internet·purpose 없음), default(구간, 실제 인터넷 경로 wifi/cellular/vpn/none…, label = SSID·통신사. none이 오프라인), signal(구간, 신호 단계 0~4가 같은 동안. connection_id/transport/level/dbm_min/dbm_max. 1분 미만 흔들림은 dbm 범위에만) | 원본 이벤트 테이블은 두지 않는다. 신호 세기는 연결 테이블에 넣지 않고 signal에만. 통화(IMS)·MMS용 모바일 네트워크도 저장하고 읽는 쪽에서 `internet`으로 거른다. 위치 권한이 없으면 소스가 켜지지 않는다. `store_bssid` |
+| phone-bluetooth | event:bluetooth + timer | connection(구간, 기기 하나와 링크가 이어져 있던 동안. address/name/kind(headphones·car·watch…)/device_type/major_class/device_class/transports(bredr·le)/profiles(a2dp·headset·le_audio·hid…, 그 동안 붙었던 것)/battery_start/battery_end), audio(구간, A2DP로 소리가 나가던 동안. connection_id/address/name), adapter(구간, 블루투스 on/off. 빈틈없이 이어짐) | 원본 이벤트 테이블은 두지 않는다. 끊겼다가 1분 안에 다시 붙으면 같은 구간. 근처 기기(BLUETOOTH_CONNECT) 권한이 없으면 소스가 켜지지 않는다. `store_address` |
 | health | read:health (+read:shealth) + timer | span(metric/value/category/extra), point(metric/value/unit) | 1시간마다 지난 2일을 다시 읽는다. 같은 레코드는 id가 같아 덮어씀 |
 
 health 지표: steps(시간별 `hourly`)·steps/distance/active_kcal/total_kcal/floors/resting_heart_rate(일별 `daily`)·sleep(구간, extra.stages_min)·sleep_stage(category deep/light/rem/awake)·exercise(category 제목)·heart_rate/spo2/hrv/body_temp/weight(시점). `metrics` 설정으로 고른다(기본 steps, heart_rate, sleep).
