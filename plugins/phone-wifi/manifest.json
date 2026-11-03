@@ -1,0 +1,77 @@
+{
+  "type": "collector",
+  "id": "phone-wifi",
+  "version": "1.0.0",
+  "name": "와이파이 연결 (안드로이드)",
+  "min_host_version": 1,
+  "platforms": [
+    "android"
+  ],
+  "runtimes": {
+    "js": "main.js"
+  },
+  "capabilities": [
+    {
+      "id": "event:wifi",
+      "required": true
+    }
+  ],
+  "privacy": [
+    {
+      "key": "store_bssid",
+      "type": "boolean",
+      "default": true,
+      "label": "BSSID(공유기 MAC) 저장 (끄면 SSID만. BSSID는 위치를 알아낼 수 있다)"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "connection",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "network": "text",
+        "ssid": "text",
+        "bssid": "text",
+        "frequency_mhz": "integer",
+        "band": "text",
+        "standard": "text",
+        "security": "text",
+        "rssi": "integer",
+        "link_speed_mbps": "integer",
+        "validated": "boolean",
+        "metered": "boolean",
+        "ip": "text",
+        "gateway": "text",
+        "roams": "integer"
+      },
+      "label": "ssid",
+      "identity": [
+        "network"
+      ],
+      "index": [
+        "ssid"
+      ]
+    },
+    {
+      "name": "event",
+      "kind": "event",
+      "schema_version": 1,
+      "columns": {
+        "kind": "text",
+        "network": "text",
+        "ssid": "text",
+        "bssid": "text",
+        "raw": "jsonb"
+      },
+      "label": "kind",
+      "identity": [
+        "network",
+        "kind"
+      ],
+      "index": [
+        "ssid"
+      ]
+    }
+  ]
+}
