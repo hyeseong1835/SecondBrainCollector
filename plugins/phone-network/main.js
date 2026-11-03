@@ -1,6 +1,6 @@
 // 네트워크 수집기(안드로이드). network 소스가 주는 이벤트를 망별 구간으로 나눈다. 원본(raw) 이벤트 테이블은 두지 않는다.
 //   wifi     와이파이 SSID 하나에 붙어 있던 동안. 같은 SSID 안의 AP 이동은 roams만 올린다
-//   cellular 모바일 데이터 연결. 망 종류(rat: lte·nr_nsa…)가 바뀌어 1분 넘게 유지되면 새 구간
+//   cellular 모바일 네트워크 연결(인터넷·통화 ims·문자 mms…, purpose로 구분). 망 종류(rat: lte·nr_nsa…)가 바뀌어 1분 넘게 유지되면 새 구간
 //   default  실제 인터넷 경로(wifi·cellular·vpn·none…). 빈틈없이 이어지고 none이 오프라인
 //   signal   신호 단계(0~4)가 같은 동안. 단계가 바뀌어 1분 넘게 유지되면 새 구간, 그보다 짧은 흔들림은 지금 구간의 dbm_min/max에만 들어간다
 // 수집기가 꺼져 있던 동안은 알 수 없으므로, 다시 켜지면 그 때부터 새 구간을 연다.
@@ -21,7 +21,9 @@ function wifiRow(ev, keepBssid) {
     validated: ev.validated, metered: ev.metered, ip: ev.ip, gateway: ev.gateway
   };
 }
-const cellRow = ev => ({ network: ev.network, carrier: ev.carrier, sim_slot: ev.sim_slot, rat: ev.rat, roaming: ev.roaming, validated: ev.validated, metered: ev.metered, ip: ev.ip });
+// 통화(ims)·문자(mms) 같은 인터넷 아닌 모바일 네트워크도 그대로 저장한다. 거르는 것은 읽는 쪽(internet·purpose 열)
+const cellRow = ev => ({ network: ev.network, carrier: ev.carrier, sim_slot: ev.sim_slot, rat: ev.rat, roaming: ev.roaming, validated: ev.validated, metered: ev.metered, ip: ev.ip,
+  internet: ev.internet, purpose: ev.purpose });
 
 function closeSignal(ctx, tr, at) { const s = signal[tr]; if (s) { ctx.span.close(s.id, at); delete signal[tr]; } }
 function openSignal(ctx, tr, start, level, min, max, conn) {
@@ -88,7 +90,6 @@ function onWifi(ctx, ev, keepBssid) {
 
 function onCell(ctx, ev) {
   const c = cell[ev.network];
-  if (!c && ev.internet === false) return;   // 통화(IMS)·MMS용 모바일 네트워크는 인터넷이 아니다
   if (ev.kind === "lost") {
     if (!c) return;
     ctx.span.close(c.id, ev.time); delete cell[ev.network];

@@ -48,7 +48,8 @@ lifelog.ready(async (range, widget) => {
   const opts = { range, limit: 5000 }; if (st.device) opts.device = st.device;
   const S0 = S.ms(range.start), E0 = S.ms(range.end), span = E0 - S0, now = Math.min(Date.now(), E0);
   const [cellRaw, defRaw] = await Promise.all([q("phone-network/cellular", opts), q("phone-network/default", Object.assign({}, opts, { where: { transport: "cellular" } }))]);
-  const cell = S.clip(openEnd(cellRaw, now), range.start, range.end), used = S.clip(openEnd(defRaw, now), range.start, range.end);
+  // 인터넷용 연결만(통화 ims·문자 mms 등은 purpose로 따로 저장돼 있다). internet이 없는 옛 행(@1)은 인터넷용으로 본다
+  const cell = S.clip(openEnd(cellRaw.filter(r => r.internet !== false), now), range.start, range.end), used = S.clip(openEnd(defRaw, now), range.start, range.end);
   if (cell.length === 0 && used.length === 0) { root.innerHTML = '<span class="mute">모바일 데이터 기록 없음</span>'; return; }
   root.className = "";
 

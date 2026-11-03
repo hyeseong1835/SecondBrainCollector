@@ -113,6 +113,8 @@ class CollectorService : Service() {
                 val r = db.registerPlugin(m, cfg.device)
                 val created = r.optJSONArray("created_tables")
                 if (created != null && created.length() > 0) log(this, "[${m.id}] 테이블 생성: $created")
+                // 옛 schema_version 테이블도: 버전을 올리기 전에 큐에 쌓인 행(stop에서 닫은 구간 등)이 남아 있을 수 있다
+                for (t in db.collectorTables(m.id)) tables[t.table] = t
                 for (o in m.outputs) tables[m.tableName(o)] = TableMeta(m.tableName(o), o.isSpan, o.columns)
                 val inst = db.getInstall(m.id, cfg.device) ?: continue
                 installs[m.id] = inst

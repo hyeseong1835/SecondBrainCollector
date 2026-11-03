@@ -158,6 +158,17 @@ class Db(private val cfg: Config) : AutoCloseable {
         } catch (e: Exception) { c.rollback(); throw e } finally { c.autoCommit = true }
     }
 
+    /** 플러그인의 모든 출력 테이블(옛 schema_version 포함). 출력을 올린 뒤 큐에 남은 옛 버전 행을 올릴 때 쓴다. */
+    fun collectorTables(plugin: String): List<TableMeta> = connection().prepareStatement(
+        "SELECT table_name, kind, columns::text FROM lifelog.collector_tables WHERE plugin_id = ?").use { ps ->
+        ps.setString(1, plugin)
+        ps.executeQuery().use { r ->
+            val out = ArrayList<TableMeta>()
+            while (r.next()) { val c = JSONObject(r.getString(3)); out.add(TableMeta(r.getString(1), r.getString(2) == "span", c.keys().asSequence().associateWith { c.getString(it) })) }
+            out
+        }
+    }
+
     fun touchLastSeen(device: String) = connection().prepareStatement("UPDATE lifelog.devices SET last_seen = now() WHERE id = ?").use { ps -> ps.setString(1, device); ps.executeUpdate() }
 
     fun stateGet(plugin: String, device: String, key: String): String? = connection().prepareStatement(

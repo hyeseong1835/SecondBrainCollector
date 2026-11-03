@@ -111,7 +111,9 @@ class NetworkSource(private val context: Context) : EventSource {
         val cb = object : TelephonyCallback(), TelephonyCallback.SignalStrengthsListener, TelephonyCallback.DisplayInfoListener {
             override fun onSignalStrengthsChanged(ss: SignalStrength) = guard("signal") {
                 val dbm = ss.cellSignalStrengths.firstOrNull()?.dbm?.takeIf { it != Int.MAX_VALUE }
-                val net = states.entries.firstOrNull { it.value.caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true && it.value.signature != null }?.key
+                // 신호는 인터넷용 모바일 연결에 붙인다(통화용 IMS 등도 같은 기지국이지만 연결 구간이 따로다)
+                val cells = states.entries.filter { it.value.caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true && it.value.signature != null }
+                val net = (cells.firstOrNull { it.value.caps!!.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) } ?: cells.firstOrNull())?.key
                 emit(base("signal", "cellular", net).put("level", ss.level).put("dbm", dbm ?: JSONObject.NULL))
             }
             override fun onDisplayInfoChanged(info: TelephonyDisplayInfo) = guard("rat") {
@@ -176,6 +178,7 @@ class NetworkSource(private val context: Context) : EventSource {
                 o.put("carrier", carrier(caps) ?: JSONObject.NULL)
                 o.put("sim_slot", subscription(caps)?.let { SubscriptionManager.getSlotIndex(it) }?.takeIf { it >= 0 } ?: JSONObject.NULL)
                 o.put("rat", rat ?: JSONObject.NULL)
+                o.put("purpose", purpose(caps))
             }
         }
         val lp = s.link
@@ -202,6 +205,17 @@ class NetworkSource(private val context: Context) : EventSource {
         c.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
         c.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) -> "bluetooth"
         else -> "other"
+    }
+
+    /** 모바일 네트워크의 용도. 인터넷이 있으면 internet, 아니면 OS가 붙인 용도 능력 중 첫째(통화 ims·문자 mms·위치 supl·긴급 emergency…). */
+    private fun purpose(c: NetworkCapabilities): String {
+        if (c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return "internet"
+        val named = listOf(
+            NetworkCapabilities.NET_CAPABILITY_IMS to "ims", NetworkCapabilities.NET_CAPABILITY_MMS to "mms", NetworkCapabilities.NET_CAPABILITY_EIMS to "emergency",
+            NetworkCapabilities.NET_CAPABILITY_SUPL to "supl", NetworkCapabilities.NET_CAPABILITY_XCAP to "xcap", NetworkCapabilities.NET_CAPABILITY_RCS to "rcs",
+            NetworkCapabilities.NET_CAPABILITY_CBS to "cbs", NetworkCapabilities.NET_CAPABILITY_FOTA to "fota", NetworkCapabilities.NET_CAPABILITY_DUN to "dun",
+            NetworkCapabilities.NET_CAPABILITY_IA to "ia", NetworkCapabilities.NET_CAPABILITY_MCX to "mcx", NetworkCapabilities.NET_CAPABILITY_ENTERPRISE to "enterprise")
+        return named.firstOrNull { c.hasCapability(it.first) }?.second ?: "other"
     }
 
     private fun ssid(w: WifiInfo?) = w?.ssid?.takeUnless { it == "<unknown ssid>" }?.removeSurrounding("\"")   // WifiManager.UNKNOWN_SSID
