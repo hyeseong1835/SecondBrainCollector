@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<style>
+  :root { --fg:#ddd; --mute:#888; --dur:#aaa; --bar-fg:#000; --line:#2a2a2a; --track:#262626; --warn:#e98; color-scheme: dark; }
+  :root[data-theme="light"] { --fg:#1c1c1e; --mute:#6b6b70; --dur:#555; --line:#dcdce0; --track:#ececef; --warn:#c44; color-scheme: light; }
+  body { margin:0; padding:8px 12px; font: 12px/1.4 "Segoe UI Variable", "Segoe UI", sans-serif; color:var(--fg); background:transparent; }
+  h3 { margin:10px 0 4px; font-size:11px; font-weight:600; color:var(--mute); }
+  h3:first-child { margin-top:0; }
+  .row { display:grid; grid-template-columns: 1fr 64px; align-items:center; gap:8px; margin:3px 0; }
+  .bar { height:16px; border-radius:3px; display:flex; align-items:center; padding:0 5px; color:var(--bar-fg); font-size:11px; white-space:nowrap; overflow:hidden; min-width:2px; }
+  .n { text-align:right; color:var(--dur); font-variant-numeric: tabular-nums; }
+  .track { position:relative; height:18px; background:var(--track); border-radius:3px; overflow:hidden; }
+  .seg { position:absolute; top:0; bottom:0; min-width:1px; }
+  .labels { display:flex; justify-content:space-between; color:var(--mute); margin-top:3px; font-size:10px; font-variant-numeric: tabular-nums; }
+  table { border-collapse:collapse; width:100%; }
+  td { padding:2px 6px 2px 0; vertical-align:top; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; }
+  td.t, td.d { color:var(--mute); font-variant-numeric: tabular-nums; }
+  td.x { color:var(--mute); font-size:11px; }
+  .warn { color:var(--warn); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+  .mute { color:var(--mute); }
+</style></head>
+<body><div id="root" class="mute">불러오는 중…</div>
+<script src="https://app.lifelog/sdk.js"></script>
+<script>
+const S = LifeLogSdk;
+async function q(view, opts) { try { return (await lifelog.query(view, opts)).rows; } catch (e) { return []; } }
+// 위치 권한이 없으면 SSID가 비어 온다
+const name = r => r.ssid || "(이름 모름)";
+
+lifelog.ready(async (range, widget) => {
+  const st = widget.settings || {};
+  const ssids = Number(st.ssids) || 8, limit = Number(st.limit) || 30;
+  const root = document.getElementById("root");
+  const opts = { range, limit: 5000 }; if (st.device) opts.device = st.device;
+  const S0 = S.ms(range.start), E0 = S.ms(range.end), span = E0 - S0;
+  // 열린 구간은 end가 비어 있을 수 있다 → 지금(또는 하루 끝)까지로
+  const now = Math.min(Date.now(), E0);
+  const rows = S.clip((await q("phone-wifi/connection", opts)).map(r => Object.assign({}, r, { end: r.end || new Date(now).toISOString() })), range.start, range.end)
+    .sort((a, b) => b.s - a.s);
+  if (rows.length === 0) { root.innerHTML = '<span class="mute">와이파이 연결 기록 없음</span>'; return; }
+  root.className = "";
+
+  // (1) SSID별 연결 시간(겹치는 구간은 SSID 안에서 합쳐 두 번 세지 않는다)
+  const merged = S.merge(rows, name, 0);
+  const groups = S.groupSum(merged, name).sort((a, b) => b.ms - a.ms);
+  const total = S.sumMs(S.merge(rows, () => "", 0));
+  const max = groups[0].ms;
+  const barsHtml = groups.slice(0, ssids).map(g => `<div class="row" title="${S.esc(g.key)} ${S.fmtDur(g.ms)} · ${g.n}번">
+    <div class="bar" style="width:${Math.max(2, g.ms / max * 100)}%;background:${S.hashColor(g.key)}">${S.esc(g.key)}</div><div class="n">${S.fmtDur(g.ms)}</div></div>`).join("") +
+    (groups.length > ssids ? `<div class="mute">… SSID ${groups.length - ssids}개 더</div>` : "");
+
+  // (2) 타임라인: 와이파이에 붙어 있던 동안을 SSID 색으로. 빈 곳은 와이파이 아님(모바일 데이터·오프라인·수집기 꺼짐)
+  const segHtml = merged.map(r => `<div class="seg" title="${S.esc(name(r))} ${S.fmtTime(r.s)}–${S.fmtTime(r.e)} (${S.fmtDur(r.e - r.s)})"
+    style="left:${(r.s - S0) / span * 100}%;width:${(r.e - r.s) / span * 100}%;background:${S.hashColor(name(r))}"></div>`).join("");
+  const ticks = [0, 6, 12, 18, 24].map(h => `<span>${S.fmtTime(S0 + h * 3600e3)}</span>`).join("");
+  const lineHtml = `<div class="track">${segHtml}</div><div class="labels">${ticks}</div>`;
+
+  // (3) 목록: 시작–끝, SSID, 시간, 대역·규격, 인터넷 확인 안 됨·종량제·AP 이동
+  const listHtml = `<table>${rows.slice(0, limit).map(r => {
+    const tags = [];
+    if (r.validated === false) tags.push('<span class="warn">인터넷 없음</span>');
+    if (r.metered) tags.push("종량제");
+    if (r.roams > 0) tags.push(`AP 이동 ${r.roams}`);
+    const radio = [r.band, r.standard].filter(Boolean).join(" ");
+    return `<tr title="${S.esc([r.security, r.ip, r.gateway && "게이트웨이 " + r.gateway, r.link_speed_mbps && r.link_speed_mbps + "Mbps"].filter(Boolean).join(" · "))}">
+      <td class="t">${S.fmtTime(r.s)}–${S.fmtTime(r.e)}</td><td><span class="dot" style="background:${S.hashColor(name(r))}"></span>${S.esc(name(r))}</td>
+      <td class="d">${S.fmtDur(r.e - r.s)}</td><td class="x">${S.esc(radio)}</td><td class="x">${tags.join(" · ")}</td></tr>`;
+  }).join("")}</table>` + (rows.length > limit ? `<div class="mute">… ${rows.length - limit}개 더</div>` : "");
+
+  root.innerHTML = `<h3>SSID별 연결 시간 · 합계 ${S.fmtDur(total)} (하루의 ${Math.round(total / span * 100)}%)</h3>${barsHtml}
+    <h3>타임라인</h3>${lineHtml}
+    <h3>연결 목록</h3>${listHtml}`;
+});
+</script></body></html>
