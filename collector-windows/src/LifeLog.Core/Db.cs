@@ -130,6 +130,18 @@ public sealed class Db : IAsyncDisposable
     }
 
     /// <summary>등록부에서 수집기 출력 목록(테이블 메타 + 매니페스트의 라벨 열·kind). 내장 타임라인용.</summary>
+    /// <summary>플러그인의 모든 출력 테이블(옛 schema_version 포함). 출력을 올린 뒤 큐에 남은 옛 버전 행을 올릴 때 쓴다.</summary>
+    public async Task<List<TableMeta>> CollectorTablesAsync(string plugin, CancellationToken ct = default)
+    {
+        await using var cmd = _ds.CreateCommand("SELECT table_name, kind, columns::text FROM lifelog.collector_tables WHERE plugin_id = $1");
+        cmd.Parameters.Add(new NpgsqlParameter { Value = plugin });
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        var list = new List<TableMeta>();
+        while (await r.ReadAsync(ct))
+            list.Add(new TableMeta(r.GetString(0), r.GetString(1) == "span", JsonSerializer.Deserialize<Dictionary<string, string>>(r.GetString(2))!));
+        return list;
+    }
+
     public async Task<List<OutputInfo>> ListOutputsAsync(CancellationToken ct = default)
     {
         await using var cmd = _ds.CreateCommand(

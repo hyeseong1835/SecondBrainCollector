@@ -71,6 +71,9 @@ public sealed class Host : IAsyncDisposable
                     var r = await Db.RegisterPluginAsync(m, Config.Device);
                     var created = r.GetProperty("created_tables").EnumerateArray().Select(e => e.GetString()).ToList();
                     if (created.Count > 0) Log($"[{m.Id}] 테이블 생성: {string.Join(", ", created)}");
+                    // 옛 schema_version 테이블도: 버전을 올리기 전에 큐에 쌓인 행(stop에서 닫은 구간 등)이 남아 있을 수 있다
+                    foreach (var t in await Db.CollectorTablesAsync(m.Id))
+                        _tables[t.Table] = t;
                     foreach (var o in m.Outputs)
                         _tables[m.TableName(o)] = new TableMeta(m.TableName(o), o.IsSpan, o.Columns);
                     var inst = await Db.GetInstallAsync(m.Id, Config.Device);
