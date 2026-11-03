@@ -31,6 +31,7 @@ $EXE run                 # 콘솔. 또는 run --tray (콘솔 숨김, 트레이 �
 $EXE stop                # 정상 종료(열린 구간 닫고 큐 비움)
 $EXE autostart on        # 로그온 시 `run --tray` (작업 스케줄러)
 ```
+- Supabase에 붙이기(로컬 Docker DB에서 옮길 때도): 일반 PowerShell에서 `powershell -ExecutionPolicy Bypass -File tools/db/pc-setup.ps1 -ProjectRef <ref>`. 비밀번호를 프롬프트로 받아 마이그레이션 → 수집기·대시보드 끄기 → `setup-reset`(없으면 `setup`) → 수집기 시작 → `-Enable` 플러그인 켜기 → 대시보드 시작. 대시보드는 수집기 설정을 그대로 쓴다.
 - `setup`은 관리자 접속으로 `register_device`를 부르고 받은 비밀번호만 저장한다. 관리자 접속 문자열은 저장하지 않는다.
 - `install`은 폴더·zip·GitHub URL을 `plugins/<id>`로 복사하고 `register_plugin`을 부른다(`LifeLog.Core/PluginInstaller.cs`, 대시보드와 공용). URL이면 등록부 `plugins.source_url`에 적는다(0006). 실행 중인 수집기가 있으면 reload 신호를 보내 호스트만 새로 만든다(트레이·뮤텍스 유지). `--grant-all`이 없으면 꺼진 채 설치되고 `enable <id>`로 켠다(지금은 권한 전부 허용. 항목별 허용 UI는 대시보드 몫).
 - `run`은 DB 코어 스키마 버전이 앱보다 높으면 쓰기를 거부한다. `autostart`는 HKCU Run 키를 쓴다(관리자 권한 불필요).
