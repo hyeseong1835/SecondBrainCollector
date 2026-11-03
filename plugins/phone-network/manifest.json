@@ -1,8 +1,8 @@
 {
   "type": "collector",
-  "id": "phone-wifi",
-  "version": "1.0.0",
-  "name": "와이파이 연결 (안드로이드)",
+  "id": "phone-network",
+  "version": "1.0.2",
+  "name": "네트워크 (안드로이드)",
   "min_host_version": 1,
   "platforms": [
     "android"
@@ -12,7 +12,11 @@
   },
   "capabilities": [
     {
-      "id": "event:wifi",
+      "id": "event:network",
+      "required": true
+    },
+    {
+      "id": "timer",
       "required": true
     }
   ],
@@ -26,7 +30,7 @@
   ],
   "outputs": [
     {
-      "name": "connection",
+      "name": "wifi",
       "kind": "span",
       "schema_version": 1,
       "columns": {
@@ -37,7 +41,6 @@
         "band": "text",
         "standard": "text",
         "security": "text",
-        "rssi": "integer",
         "link_speed_mbps": "integer",
         "validated": "boolean",
         "metered": "boolean",
@@ -54,23 +57,55 @@
       ]
     },
     {
-      "name": "event",
-      "kind": "event",
+      "name": "cellular",
+      "kind": "span",
       "schema_version": 1,
       "columns": {
-        "kind": "text",
         "network": "text",
-        "ssid": "text",
-        "bssid": "text",
-        "raw": "jsonb"
+        "carrier": "text",
+        "sim_slot": "integer",
+        "rat": "text",
+        "roaming": "boolean",
+        "validated": "boolean",
+        "metered": "boolean",
+        "ip": "text"
       },
-      "label": "kind",
+      "label": "rat",
       "identity": [
-        "network",
-        "kind"
+        "network"
+      ]
+    },
+    {
+      "name": "default",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "transport": "text",
+        "network": "text",
+        "label": "text"
+      },
+      "label": "transport",
+      "identity": [
+        "transport"
+      ]
+    },
+    {
+      "name": "signal",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "connection_id": "text",
+        "transport": "text",
+        "level": "integer",
+        "dbm_min": "integer",
+        "dbm_max": "integer"
+      },
+      "label": "level",
+      "identity": [
+        "transport"
       ],
       "index": [
-        "ssid"
+        "connection_id"
       ]
     }
   ]

@@ -25,6 +25,8 @@ docker run -d --name lifelog-pg -e POSTGRES_PASSWORD=lifelog -e POSTGRES_DB=life
 python tools/db/migrate.py --dsn postgresql://postgres:lifelog@localhost:54329/lifelog
 python tools/db/smoke.py   --dsn postgresql://postgres:lifelog@localhost:54329/lifelog
 ```
+`tools/db/drop-plugin.py <id>`(또는 비밀번호를 프롬프트로 받는 `drop-plugin.ps1 -ProjectRef … -Plugin <id>`)는 수집기 플러그인 하나의 테이블·뷰·등록부 행을 지운다(관리자). 행이 남아 있으면 멈춘다. 2026-11-03 phone-wifi → phone-network: 폰 수집기가 phone-wifi 행을 phone-network/wifi로 옮기고 지운 뒤 `drop-plugin.ps1 -Plugin phone-wifi`로 정리한다.
+
 `smoke.py`는 기기 등록 → 기기 롤로 수집기 등록(거부 사례 포함) → 행 쓰기와 RLS → 열 집합 v2와 뷰 → `set_install` → 렌더러 미충족 입력 → 기기 폐기를 밟는다. 끝에 `전부 통과`가 나와야 한다.
 
 ## 주의

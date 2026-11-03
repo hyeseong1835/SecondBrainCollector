@@ -1,0 +1,35 @@
+{
+  "type": "renderer",
+  "id": "widget-internet",
+  "version": "1.0.0",
+  "name": "인터넷 경로",
+  "description": "휴대폰 인터넷이 실제로 나간 경로(와이파이·모바일·VPN·오프라인): 타임라인, 경로별 시간, 오프라인 횟수·시간, 네트워크별 시간",
+  "min_host_version": 1,
+  "runtimes": {
+    "webview": "index.html"
+  },
+  "slot": "card",
+  "inputs": [
+    "phone-network/default@1"
+  ],
+  "settings": [
+    {
+      "key": "labels",
+      "type": "number",
+      "default": 6,
+      "label": "네트워크 막대 개수"
+    },
+    {
+      "key": "min_offline_sec",
+      "type": "number",
+      "default": 30,
+      "label": "오프라인으로 셀 최소 길이(초)"
+    },
+    {
+      "key": "device",
+      "type": "string",
+      "default": "",
+      "label": "기기 (비우면 전부)"
+    }
+  ]
+}

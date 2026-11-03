@@ -1,16 +1,17 @@
 {
   "type": "renderer",
   "id": "widget-wifi",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "와이파이",
-  "description": "휴대폰 와이파이 연결: SSID별 연결 시간, 하루 타임라인, 연결 목록(시각·SSID·대역·인터넷 확인·AP 이동)",
+  "description": "휴대폰 와이파이 연결: SSID별 연결 시간, 하루 타임라인, 연결 목록(시각·SSID·대역·평균 신호·인터넷 확인·AP 이동)",
   "min_host_version": 1,
   "runtimes": {
     "webview": "index.html"
   },
   "slot": "card",
   "inputs": [
-    "phone-wifi/connection@1"
+    "phone-network/wifi@1",
+    "phone-network/signal@1"
   ],
   "settings": [
     {

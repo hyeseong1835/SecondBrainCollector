@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<style>
+  :root { --fg:#ddd; --mute:#888; --dur:#aaa; --bar-fg:#000; --line:#2a2a2a; --track:#262626; --warn:#e98; color-scheme: dark; }
+  :root[data-theme="light"] { --fg:#1c1c1e; --mute:#6b6b70; --dur:#555; --line:#dcdce0; --track:#ececef; --warn:#c44; color-scheme: light; }
+  body { margin:0; padding:8px 12px; font: 12px/1.4 "Segoe UI Variable", "Segoe UI", sans-serif; color:var(--fg); background:transparent; }
+  h3 { margin:10px 0 4px; font-size:11px; font-weight:600; color:var(--mute); }
+  h3:first-child { margin-top:0; }
+  .row { display:grid; grid-template-columns: 1fr 72px; align-items:center; gap:8px; margin:3px 0; }
+  .bar { height:16px; border-radius:3px; display:flex; align-items:center; padding:0 5px; color:var(--bar-fg); font-size:11px; white-space:nowrap; overflow:hidden; min-width:2px; }
+  .n { text-align:right; color:var(--dur); font-variant-numeric: tabular-nums; }
+  .track { position:relative; height:18px; background:var(--track); border-radius:3px; overflow:hidden; }
+  .seg { position:absolute; top:0; bottom:0; min-width:1px; }
+  .lane { display:grid; grid-template-columns: 64px 1fr; gap:8px; align-items:center; margin:3px 0; }
+  .lane > span { color:var(--mute); font-size:11px; }
+  .labels { display:flex; justify-content:space-between; color:var(--mute); margin-top:3px; font-size:10px; font-variant-numeric: tabular-nums; }
+  .ticks { margin-left:72px; }
+  .stats { display:flex; flex-wrap:wrap; gap:4px 16px; margin:2px 0 4px; }
+  .stats b { font-size:15px; font-weight:600; font-variant-numeric: tabular-nums; }
+  .stats span { color:var(--mute); font-size:11px; margin-left:4px; }
+  .legend { display:flex; flex-wrap:wrap; gap:4px 12px; color:var(--mute); font-size:11px; margin-top:4px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+  .warn { color:var(--warn); }
+  .mute { color:var(--mute); }
+</style></head>
+<body><div id="root" class="mute">불러오는 중…</div>
+<script src="https://app.lifelog/sdk.js"></script>
+<script>
+const S = LifeLogSdk;
+async function q(view, opts) { try { return (await lifelog.query(view, opts)).rows; } catch (e) { return []; } }
+// 열린 구간은 end가 비어 있을 수 있다 → 지금(또는 하루 끝)까지로
+const openEnd = (rows, now) => rows.map(r => Object.assign({}, r, { end: r.end || new Date(now).toISOString() }));
+const ticksHtml = S0 => [0, 6, 12, 18, 24].map(h => `<span>${S.fmtTime(S0 + h * 3600e3)}</span>`).join("");
+const segHtml = (list, S0, span, color, title) => list.map(r => `<div class="seg" title="${title(r)} ${S.fmtTime(r.s)}–${S.fmtTime(r.e)} (${S.fmtDur(r.e - r.s)})"
+  style="left:${(r.s - S0) / span * 100}%;width:${(r.e - r.s) / span * 100}%;background:${color(r)}"></div>`).join("");
+const LEVEL = ["#ff453a", "#ff9f0a", "#ffd60a", "#a4d65e", "#30d158"];   // 0~4
+const NAME = ["없음", "아주 약함", "약함", "보통", "강함"];
+const TR = [["wifi", "와이파이"], ["cellular", "모바일"]];
+
+lifelog.ready(async (range, widget) => {
+  const st = widget.settings || {};
+  const root = document.getElementById("root");
+  const opts = { range, limit: 20000 }; if (st.device) opts.device = st.device;
+  const S0 = S.ms(range.start), E0 = S.ms(range.end), span = E0 - S0, now = Math.min(Date.now(), E0);
+  const rows = S.clip(openEnd(await q("phone-network/signal", opts), now), range.start, range.end);
+  if (rows.length === 0) { root.innerHTML = '<span class="mute">신호 기록 없음</span>'; return; }
+  root.className = "";
+
+  let lanes = "", dist = "", stats = "";
+  for (const [tr, label] of TR) {
+    const list = rows.filter(r => r.transport === tr);
+    if (!list.length) continue;
+    const total = S.sumMs(list);
+    const avg = list.reduce((a, r) => a + r.level * (r.e - r.s), 0) / total;
+    const weak = S.sumMs(list.filter(r => r.level <= 1));
+    stats += `<div><b>${avg.toFixed(1)}</b><span>${label} 평균 단계</span></div><div><b class="${weak ? "warn" : ""}">${S.fmtDur(weak)}</b><span>${label} 약한 신호(0~1)</span></div>`;
+    lanes += `<div class="lane"><span>${label}</span><div class="track">${segHtml(list, S0, span, r => LEVEL[r.level] || "#8e8e93",
+      r => `${label} ${r.level}단계(${NAME[r.level] || ""})${r.dbm_min != null ? ` ${r.dbm_min}~${r.dbm_max} dBm` : ""}`)}</div></div>`;
+    // 단계별 시간 비율을 막대 하나에 쌓는다
+    const by = new Map(); for (const r of list) by.set(r.level, (by.get(r.level) || 0) + r.e - r.s);
+    let left = 0;
+    const parts = [0, 1, 2, 3, 4].filter(l => by.get(l)).map(l => {
+      const w = by.get(l) / total * 100;
+      const h = `<div class="seg" title="${l}단계(${NAME[l]}) ${S.fmtDur(by.get(l))} · ${Math.round(w)}%" style="left:${left}%;width:${w}%;background:${LEVEL[l]}"></div>`;
+      left += w; return h;
+    }).join("");
+    const mins = list.map(r => r.dbm_min).filter(v => v != null), maxs = list.map(r => r.dbm_max).filter(v => v != null);
+    dist += `<div class="lane"><span>${label}</span><div class="track">${parts}</div></div>
+      <div class="lane"><span></span><span class="mute">${mins.length ? `${Math.min(...mins)} ~ ${Math.max(...maxs)} dBm · ` : ""}기록 ${S.fmtDur(total)}</span></div>`;
+  }
+  const legend = [4, 3, 2, 1, 0].map(l => `<span><span class="dot" style="background:${LEVEL[l]}"></span>${l} ${NAME[l]}</span>`).join("");
+  root.innerHTML = `<div class="stats">${stats}</div><h3>타임라인</h3>${lanes}<div class="labels ticks">${ticksHtml(S0)}</div><div class="legend">${legend}</div><h3>단계별 비율</h3>${dist}`;
+});
+</script></body></html>

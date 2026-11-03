@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<style>
+  :root { --fg:#ddd; --mute:#888; --dur:#aaa; --bar-fg:#000; --line:#2a2a2a; --track:#262626; --warn:#e98; color-scheme: dark; }
+  :root[data-theme="light"] { --fg:#1c1c1e; --mute:#6b6b70; --dur:#555; --line:#dcdce0; --track:#ececef; --warn:#c44; color-scheme: light; }
+  body { margin:0; padding:8px 12px; font: 12px/1.4 "Segoe UI Variable", "Segoe UI", sans-serif; color:var(--fg); background:transparent; }
+  h3 { margin:10px 0 4px; font-size:11px; font-weight:600; color:var(--mute); }
+  h3:first-child { margin-top:0; }
+  .row { display:grid; grid-template-columns: 1fr 72px; align-items:center; gap:8px; margin:3px 0; }
+  .bar { height:16px; border-radius:3px; display:flex; align-items:center; padding:0 5px; color:var(--bar-fg); font-size:11px; white-space:nowrap; overflow:hidden; min-width:2px; }
+  .n { text-align:right; color:var(--dur); font-variant-numeric: tabular-nums; }
+  .track { position:relative; height:18px; background:var(--track); border-radius:3px; overflow:hidden; }
+  .seg { position:absolute; top:0; bottom:0; min-width:1px; }
+  .lane { display:grid; grid-template-columns: 64px 1fr; gap:8px; align-items:center; margin:3px 0; }
+  .lane > span { color:var(--mute); font-size:11px; }
+  .labels { display:flex; justify-content:space-between; color:var(--mute); margin-top:3px; font-size:10px; font-variant-numeric: tabular-nums; }
+  .ticks { margin-left:72px; }
+  .stats { display:flex; flex-wrap:wrap; gap:4px 16px; margin:2px 0 4px; }
+  .stats b { font-size:15px; font-weight:600; font-variant-numeric: tabular-nums; }
+  .stats span { color:var(--mute); font-size:11px; margin-left:4px; }
+  .legend { display:flex; flex-wrap:wrap; gap:4px 12px; color:var(--mute); font-size:11px; margin-top:4px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+  .warn { color:var(--warn); }
+  .mute { color:var(--mute); }
+</style></head>
+<body><div id="root" class="mute">불러오는 중…</div>
+<script src="https://app.lifelog/sdk.js"></script>
+<script>
+const S = LifeLogSdk;
+async function q(view, opts) { try { return (await lifelog.query(view, opts)).rows; } catch (e) { return []; } }
+// 열린 구간은 end가 비어 있을 수 있다 → 지금(또는 하루 끝)까지로
+const openEnd = (rows, now) => rows.map(r => Object.assign({}, r, { end: r.end || new Date(now).toISOString() }));
+const ticksHtml = S0 => [0, 6, 12, 18, 24].map(h => `<span>${S.fmtTime(S0 + h * 3600e3)}</span>`).join("");
+const segHtml = (list, S0, span, color, title) => list.map(r => `<div class="seg" title="${title(r)} ${S.fmtTime(r.s)}–${S.fmtTime(r.e)} (${S.fmtDur(r.e - r.s)})"
+  style="left:${(r.s - S0) / span * 100}%;width:${(r.e - r.s) / span * 100}%;background:${color(r)}"></div>`).join("");
+const KIND = { wifi: ["와이파이", "#5ac8fa"], cellular: ["모바일 데이터", "#ff9f0a"], vpn: ["VPN", "#bf5af2"], ethernet: ["이더넷", "#64d2ff"], bluetooth: ["블루투스", "#0a84ff"], other: ["기타", "#8e8e93"], none: ["오프라인", "#ff453a"] };
+const kind = t => KIND[t] || [t, "#8e8e93"];
+
+lifelog.ready(async (range, widget) => {
+  const st = widget.settings || {};
+  const labels = Number(st.labels) || 6, minOff = (Number(st.min_offline_sec) || 30) * 1000;
+  const root = document.getElementById("root");
+  const opts = { range, limit: 5000 }; if (st.device) opts.device = st.device;
+  const S0 = S.ms(range.start), E0 = S.ms(range.end), span = E0 - S0, now = Math.min(Date.now(), E0);
+  const rows = S.clip(openEnd(await q("phone-network/default", opts), now), range.start, range.end);
+  if (rows.length === 0) { root.innerHTML = '<span class="mute">인터넷 경로 기록 없음</span>'; return; }
+  root.className = "";
+
+  // (1) 요약: 기록된 비율(빈 곳은 수집기가 꺼져 있던 시간), 오프라인(경로 none. 짧은 끊김은 세지 않는다)
+  const known = S.sumMs(rows);
+  const off = rows.filter(r => r.transport === "none" && r.e - r.s >= minOff);
+  const offMs = S.sumMs(off), longest = off.reduce((m, r) => Math.max(m, r.e - r.s), 0);
+  const statsHtml = `<div class="stats"><div><b>${Math.round(known / Math.max(1, now - S0) * 100)}%</b><span>기록된 시간</span></div>
+    <div><b class="${offMs ? "warn" : ""}">${S.fmtDur(offMs)}</b><span>오프라인 ${off.length}번${longest ? " · 최장 " + S.fmtDur(longest) : ""}</span></div></div>`;
+
+  // (2) 경로별 시간
+  const by = S.groupSum(rows, r => r.transport).sort((a, b) => b.ms - a.ms);
+  const max = by[0].ms;
+  const barsHtml = by.map(g => `<div class="row"><div class="bar" style="width:${Math.max(2, g.ms / max * 100)}%;background:${kind(g.key)[1]}">${kind(g.key)[0]}</div><div class="n">${S.fmtDur(g.ms)}</div></div>`).join("");
+  const legend = by.map(g => `<span><span class="dot" style="background:${kind(g.key)[1]}"></span>${kind(g.key)[0]}</span>`).join("");
+  const line = segHtml(rows, S0, span, r => kind(r.transport)[1], r => kind(r.transport)[0] + (r.label ? " · " + S.esc(r.label) : ""));
+
+  // (3) 네트워크별(와이파이 SSID·통신사)
+  const named = S.groupSum(rows.filter(r => r.label), r => kind(r.transport)[0] + " · " + r.label).sort((a, b) => b.ms - a.ms);
+  const nmax = named.length ? named[0].ms : 1;
+  const namedHtml = named.slice(0, labels).map(g => `<div class="row"><div class="bar" style="width:${Math.max(2, g.ms / nmax * 100)}%;background:${S.hashColor(g.key)}">${S.esc(g.key)}</div><div class="n">${S.fmtDur(g.ms)}</div></div>`).join("");
+
+  root.innerHTML = `${statsHtml}<h3>타임라인</h3><div class="track">${line}</div><div class="labels">${ticksHtml(S0)}</div><div class="legend">${legend}</div>
+    <h3>경로별 시간</h3>${barsHtml}` + (namedHtml ? `<h3>네트워크별</h3>${namedHtml}` : "");
+});
+</script></body></html>

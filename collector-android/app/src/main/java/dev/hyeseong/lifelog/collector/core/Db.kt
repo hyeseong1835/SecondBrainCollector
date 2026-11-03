@@ -136,6 +136,28 @@ class Db(private val cfg: Config) : AutoCloseable {
         ps.setString(1, device); ps.executeUpdate()
     }
 
+    /**
+     * phone-wifi → phone-network 옮기기(2026-11-03). 이 기기의 phone-wifi/connection 행을 phone-network/wifi로 같은 id로 복사하고(rssi는 버린다),
+     * phone-wifi의 두 테이블에서 이 기기 행을 지운다. 테이블 자체는 관리자가 tools/db/drop-plugin.py로 지운다. 옮긴 행 수, phone-wifi가 없으면 -1.
+     */
+    fun migrateWifiToNetwork(device: String): Int {
+        val c = connection()
+        val has = c.prepareStatement("SELECT count(*) FROM lifelog.collector_tables WHERE table_name IN ('phone-wifi/connection@1', 'phone-network/wifi@1')").use { ps ->
+            ps.executeQuery().use { r -> r.next(); r.getInt(1) }
+        }
+        if (has < 2) return -1
+        c.autoCommit = false
+        try {
+            val cols = "network, ssid, bssid, frequency_mhz, band, standard, security, link_speed_mbps, validated, metered, ip, gateway, roams"
+            val n = c.prepareStatement("INSERT INTO lifelog.\"phone-network/wifi@1\" (device, id, start, \"end\", $cols) " +
+                "SELECT device, id, start, \"end\", $cols FROM lifelog.\"phone-wifi/connection@1\" WHERE device = ? ON CONFLICT (device, id) DO NOTHING").use { ps -> ps.setString(1, device); ps.executeUpdate() }
+            for (t in listOf("phone-wifi/connection@1", "phone-wifi/event@1"))
+                c.prepareStatement("DELETE FROM lifelog.\"$t\" WHERE device = ?").use { ps -> ps.setString(1, device); ps.executeUpdate() }
+            c.commit()
+            return n
+        } catch (e: Exception) { c.rollback(); throw e } finally { c.autoCommit = true }
+    }
+
     fun touchLastSeen(device: String) = connection().prepareStatement("UPDATE lifelog.devices SET last_seen = now() WHERE id = ?").use { ps -> ps.setString(1, device); ps.executeUpdate() }
 
     fun stateGet(plugin: String, device: String, key: String): String? = connection().prepareStatement(

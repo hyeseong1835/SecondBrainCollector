@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<style>
+  :root { --fg:#ddd; --mute:#888; --dur:#aaa; --bar-fg:#000; --line:#2a2a2a; --track:#262626; --warn:#e98; color-scheme: dark; }
+  :root[data-theme="light"] { --fg:#1c1c1e; --mute:#6b6b70; --dur:#555; --line:#dcdce0; --track:#ececef; --warn:#c44; color-scheme: light; }
+  body { margin:0; padding:8px 12px; font: 12px/1.4 "Segoe UI Variable", "Segoe UI", sans-serif; color:var(--fg); background:transparent; }
+  h3 { margin:10px 0 4px; font-size:11px; font-weight:600; color:var(--mute); }
+  h3:first-child { margin-top:0; }
+  .row { display:grid; grid-template-columns: 1fr 72px; align-items:center; gap:8px; margin:3px 0; }
+  .bar { height:16px; border-radius:3px; display:flex; align-items:center; padding:0 5px; color:var(--bar-fg); font-size:11px; white-space:nowrap; overflow:hidden; min-width:2px; }
+  .n { text-align:right; color:var(--dur); font-variant-numeric: tabular-nums; }
+  .track { position:relative; height:18px; background:var(--track); border-radius:3px; overflow:hidden; }
+  .seg { position:absolute; top:0; bottom:0; min-width:1px; }
+  .lane { display:grid; grid-template-columns: 64px 1fr; gap:8px; align-items:center; margin:3px 0; }
+  .lane > span { color:var(--mute); font-size:11px; }
+  .labels { display:flex; justify-content:space-between; color:var(--mute); margin-top:3px; font-size:10px; font-variant-numeric: tabular-nums; }
+  .ticks { margin-left:72px; }
+  .stats { display:flex; flex-wrap:wrap; gap:4px 16px; margin:2px 0 4px; }
+  .stats b { font-size:15px; font-weight:600; font-variant-numeric: tabular-nums; }
+  .stats span { color:var(--mute); font-size:11px; margin-left:4px; }
+  .legend { display:flex; flex-wrap:wrap; gap:4px 12px; color:var(--mute); font-size:11px; margin-top:4px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+  .warn { color:var(--warn); }
+  .mute { color:var(--mute); }
+</style></head>
+<body><div id="root" class="mute">불러오는 중…</div>
+<script src="https://app.lifelog/sdk.js"></script>
+<script>
+const S = LifeLogSdk;
+async function q(view, opts) { try { return (await lifelog.query(view, opts)).rows; } catch (e) { return []; } }
+// 열린 구간은 end가 비어 있을 수 있다 → 지금(또는 하루 끝)까지로
+const openEnd = (rows, now) => rows.map(r => Object.assign({}, r, { end: r.end || new Date(now).toISOString() }));
+const ticksHtml = S0 => [0, 6, 12, 18, 24].map(h => `<span>${S.fmtTime(S0 + h * 3600e3)}</span>`).join("");
+const segHtml = (list, S0, span, color, title) => list.map(r => `<div class="seg" title="${title(r)} ${S.fmtTime(r.s)}–${S.fmtTime(r.e)} (${S.fmtDur(r.e - r.s)})"
+  style="left:${(r.s - S0) / span * 100}%;width:${(r.e - r.s) / span * 100}%;background:${color(r)}"></div>`).join("");
+const RAT = { nr: ["5G SA", "#30d158"], nr_adv: ["5G+", "#00c7be"], nr_nsa: ["5G", "#34c759"], lte_adv: ["LTE-A Pro", "#0a84ff"], lte_ca: ["LTE-A", "#5e9cff"], lte: ["LTE", "#64d2ff"], "3g": ["3G", "#ff9f0a"], "2g": ["2G", "#ff453a"] };
+const rat = k => RAT[k] || [k || "알 수 없음", "#8e8e93"];
+// 두 구간 목록이 겹치는 부분(a의 열을 가진다)
+function overlap(a, b) {
+  const out = [];
+  for (const x of a) for (const y of b) { const s = Math.max(x.s, y.s), e = Math.min(x.e, y.e); if (e > s) out.push(Object.assign({}, x, { s, e })); }
+  return out;
+}
+
+lifelog.ready(async (range, widget) => {
+  const st = widget.settings || {};
+  const root = document.getElementById("root");
+  const opts = { range, limit: 5000 }; if (st.device) opts.device = st.device;
+  const S0 = S.ms(range.start), E0 = S.ms(range.end), span = E0 - S0, now = Math.min(Date.now(), E0);
+  const [cellRaw, defRaw] = await Promise.all([q("phone-network/cellular", opts), q("phone-network/default", Object.assign({}, opts, { where: { transport: "cellular" } }))]);
+  const cell = S.clip(openEnd(cellRaw, now), range.start, range.end), used = S.clip(openEnd(defRaw, now), range.start, range.end);
+  if (cell.length === 0 && used.length === 0) { root.innerHTML = '<span class="mute">모바일 데이터 기록 없음</span>'; return; }
+  root.className = "";
+
+  // 연결돼 있던 시간(와이파이가 있어도 대기로 붙어 있을 수 있다)과 실제로 인터넷이 모바일로 나간 시간(경로 테이블)
+  const connMs = S.sumMs(S.merge(cell, () => "", 0)), usedMs = S.sumMs(used);
+  const carriers = [...new Set(cell.map(r => r.carrier).filter(Boolean))];
+  const roam = cell.some(r => r.roaming);
+  const statsHtml = `<div class="stats"><div><b>${S.fmtDur(usedMs)}</b><span>모바일로 인터넷 사용</span></div>
+    <div><b>${S.fmtDur(connMs)}</b><span>연결돼 있던 시간</span></div>
+    ${carriers.length ? `<div><b>${S.esc(carriers.join(", "))}</b>${roam ? '<span class="warn">로밍</span>' : ""}</div>` : ""}</div>`;
+
+  // 망 종류별 사용 시간(경로가 모바일인 동안과 겹친 부분). 막대에 올리면 연결 시간
+  const um = new Map(S.groupSum(overlap(cell, used), r => r.rat || "").map(g => [g.key, g.ms]));
+  const cm = new Map(S.groupSum(cell, r => r.rat || "").map(g => [g.key, g.ms]));
+  const keys = [...cm.keys()].sort((a, b) => (um.get(b) || 0) - (um.get(a) || 0) || cm.get(b) - cm.get(a));
+  const max = Math.max(1, ...keys.map(k => um.get(k) || 0));
+  const barsHtml = keys.filter(k => um.get(k)).map(k => `<div class="row" title="연결 ${S.fmtDur(cm.get(k))}"><div class="bar" style="width:${Math.max(2, um.get(k) / max * 100)}%;background:${rat(k)[1]}">${rat(k)[0]}</div><div class="n">${S.fmtDur(um.get(k))}</div></div>`).join("");
+
+  const lineHtml = `<div class="lane"><span>연결</span><div class="track">${segHtml(cell, S0, span, r => rat(r.rat)[1], r => rat(r.rat)[0] + (r.carrier ? " · " + S.esc(r.carrier) : ""))}</div></div>
+    <div class="lane"><span>사용</span><div class="track">${segHtml(used, S0, span, () => "#ff9f0a", () => "모바일로 인터넷")}</div></div>
+    <div class="labels ticks">${ticksHtml(S0)}</div>
+    <div class="legend">${keys.map(k => `<span><span class="dot" style="background:${rat(k)[1]}"></span>${rat(k)[0]}</span>`).join("")}</div>`;
+
+  root.innerHTML = `${statsHtml}<h3>타임라인</h3>${lineHtml}<h3>망 종류별 사용 시간</h3>${barsHtml || '<span class="mute">모바일로 쓴 시간 없음</span>'}`;
+});
+</script></body></html>

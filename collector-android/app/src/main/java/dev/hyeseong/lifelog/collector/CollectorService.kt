@@ -105,6 +105,7 @@ class CollectorService : Service() {
     /** 플러그인 로드·시작·소스 켜기. QuickJs 인스턴스는 만든 스레드(디스패처)에서만 쓴다. */
     private fun loadAndStart() {
         val dir = Config.pluginsDir(this)
+        File(dir, "phone-wifi").let { if (it.isDirectory) { it.deleteRecursively(); log(this, "phone-wifi 폴더 지움(phone-network로 바뀜)") } }
         if (dir.isDirectory) for (pdir in dir.listFiles()!!.filter { File(it, "manifest.json").exists() }) {
             try {
                 val m = Manifest.load(pdir)
@@ -118,7 +119,7 @@ class CollectorService : Service() {
                 if (!inst.enabled) { log(this, "[${m.id}] 꺼져 있음"); continue }
                 // 필수 소스가 이 호스트에 없으면 못 돌린다. 선택 소스(예: read:shealth)는 has()로 플러그인이 확인한다
                 val missing = m.capabilities.filter { it.second }.map { it.first }.filter { it.startsWith("event:") || it.startsWith("read:") }
-                    .map { it.substringAfter(':') }.filter { it !in setOf("screen", "location", "media", "notification", "wifi", "usage", "health", "shealth") }
+                    .map { it.substringAfter(':') }.filter { it !in setOf("screen", "location", "media", "notification", "network", "usage", "health", "shealth") }
                 if (missing.isNotEmpty()) { log(this, "[${m.id}] 이 호스트에 없는 필수 소스: $missing"); continue }
                 val p = JsPlugin(m, pdir, HostImpl(m))
                 p.load()
@@ -126,10 +127,17 @@ class CollectorService : Service() {
             } catch (e: Exception) { log(this, "플러그인 로드 실패 ${pdir.name}: $e") }
         }
         if (plugins.isEmpty()) log(this, "켜진 플러그인이 없습니다")
+        if (!cfg.done("wifi_to_network_v1")) {   // 2026-11-03: phone-wifi 행을 phone-network/wifi로(phone-network가 등록돼 테이블이 생긴 뒤에)
+            try {
+                val n = db.migrateWifiToNetwork(cfg.device)
+                if (n >= 0) log(this, "phone-wifi → phone-network/wifi: ${n}행 옮김, phone-wifi 행 지움")
+                if (n >= 0 || "phone-network" in installs) cfg.markDone("wifi_to_network_v1")
+            } catch (e: Exception) { log(this, "phone-wifi 옮기기 실패: ${e.message}") }
+        }
 
         for (p in plugins) try { p.start(); log(this, "[${p.manifest.id}] 시작") } catch (e: Exception) { log(this, "[${p.manifest.id}] start 실패: $e") }
         for (src in plugins.flatMap { it.subscribed }.distinct()) {
-            val s: EventSource = when (src) { "screen" -> ScreenSource(this); "location" -> LocationSource(this); "media" -> MediaSource(this); "notification" -> NotificationSource(this); "wifi" -> WifiSource(this); else -> continue }
+            val s: EventSource = when (src) { "screen" -> ScreenSource(this); "location" -> LocationSource(this); "media" -> MediaSource(this); "notification" -> NotificationSource(this); "network" -> NetworkSource(this); else -> continue }
             try {
                 s.start { ev -> handler.post { for (p in plugins) p.deliver(src, ev.toString()) } }
                 eventSources[src] = s

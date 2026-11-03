@@ -97,7 +97,8 @@ class AppModel(val activity: MainActivity) {
         var n = 0
         for ((m, _) in localPlugins()) {
             db.registerPlugin(m, cfg.device)
-            val inst = db.getInstall(m.id, cfg.device)
+            // 수집기 서비스가 먼저 등록하면 설치 행이 꺼짐·권한 없음으로 생긴다. 그것도 처음으로 본다
+            val inst = db.getInstall(m.id, cfg.device)?.takeUnless { !it.enabled && it.granted.isEmpty() }
             // 이미 등록된 플러그인은 켜짐·설정·권한을 그대로 두고 버전만 올린다. 처음이면 권한 전부 허용하고 켠다
             val granted = inst?.granted?.toList() ?: m.capabilities.map { it.first }
             db.setInstall(m.id, cfg.device, m.version, inst?.enabled ?: true, inst?.settings?.toString(), JSONArray(granted).toString()); n++
@@ -107,7 +108,7 @@ class AppModel(val activity: MainActivity) {
 
     suspend fun setEnabled(row: PluginRow, on: Boolean): String = Db(cfg).use { db ->
         val inst = row.install ?: run { db.registerPlugin(row.manifest, cfg.device); null }
-        val granted = inst?.granted?.toList() ?: row.manifest.capabilities.map { it.first }
+        val granted = inst?.granted?.takeIf { it.isNotEmpty() }?.toList() ?: row.manifest.capabilities.map { it.first }
         db.setInstall(row.manifest.id, cfg.device, row.manifest.version, on, inst?.settings?.toString(), JSONArray(granted).toString())
         "${row.manifest.name} ${if (on) "켬" else "끔"}"
     }

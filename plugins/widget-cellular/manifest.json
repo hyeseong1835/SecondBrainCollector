@@ -1,0 +1,24 @@
+{
+  "type": "renderer",
+  "id": "widget-cellular",
+  "version": "1.0.0",
+  "name": "모바일 데이터",
+  "description": "휴대폰 모바일 데이터: 모바일로 인터넷을 쓴 시간과 연결돼 있던 시간, 망 종류(5G·LTE)별 사용 시간, 통신사·로밍",
+  "min_host_version": 1,
+  "runtimes": {
+    "webview": "index.html"
+  },
+  "slot": "card",
+  "inputs": [
+    "phone-network/cellular@1",
+    "phone-network/default@1"
+  ],
+  "settings": [
+    {
+      "key": "device",
+      "type": "string",
+      "default": "",
+      "label": "기기 (비우면 전부)"
+    }
+  ]
+}

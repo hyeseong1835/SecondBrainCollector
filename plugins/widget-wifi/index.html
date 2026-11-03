@@ -6,7 +6,7 @@
   body { margin:0; padding:8px 12px; font: 12px/1.4 "Segoe UI Variable", "Segoe UI", sans-serif; color:var(--fg); background:transparent; }
   h3 { margin:10px 0 4px; font-size:11px; font-weight:600; color:var(--mute); }
   h3:first-child { margin-top:0; }
-  .row { display:grid; grid-template-columns: 1fr 64px; align-items:center; gap:8px; margin:3px 0; }
+  .row { display:grid; grid-template-columns: 1fr 86px; align-items:center; gap:8px; margin:3px 0; }
   .bar { height:16px; border-radius:3px; display:flex; align-items:center; padding:0 5px; color:var(--bar-fg); font-size:11px; white-space:nowrap; overflow:hidden; min-width:2px; }
   .n { text-align:right; color:var(--dur); font-variant-numeric: tabular-nums; }
   .track { position:relative; height:18px; background:var(--track); border-radius:3px; overflow:hidden; }
@@ -19,6 +19,9 @@
   .warn { color:var(--warn); }
   .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:5px; vertical-align:middle; }
   .mute { color:var(--mute); }
+  .sig { display:inline-flex; gap:1px; align-items:flex-end; height:10px; vertical-align:middle; }
+  .sig i { width:3px; background:var(--line); border-radius:1px; }
+  .sig i.on { background:var(--dur); }
 </style></head>
 <body><div id="root" class="mute">불러오는 중…</div>
 <script src="https://app.lifelog/sdk.js"></script>
@@ -27,6 +30,8 @@ const S = LifeLogSdk;
 async function q(view, opts) { try { return (await lifelog.query(view, opts)).rows; } catch (e) { return []; } }
 // 위치 권한이 없으면 SSID가 비어 온다
 const name = r => r.ssid || "(이름 모름)";
+// 평균 신호 단계(0~4)를 막대 4개로
+const sigHtml = lv => lv == null ? "" : `<span class="sig" title="평균 신호 ${lv.toFixed(1)} / 4">${[1, 2, 3, 4].map(i => `<i class="${lv >= i - 0.5 ? "on" : ""}" style="height:${i * 25}%"></i>`).join("")}</span>`;
 
 lifelog.ready(async (range, widget) => {
   const st = widget.settings || {};
@@ -36,10 +41,18 @@ lifelog.ready(async (range, widget) => {
   const S0 = S.ms(range.start), E0 = S.ms(range.end), span = E0 - S0;
   // 열린 구간은 end가 비어 있을 수 있다 → 지금(또는 하루 끝)까지로
   const now = Math.min(Date.now(), E0);
-  const rows = S.clip((await q("phone-wifi/connection", opts)).map(r => Object.assign({}, r, { end: r.end || new Date(now).toISOString() })), range.start, range.end)
+  const [conns, sigs] = await Promise.all([q("phone-network/wifi", opts), q("phone-network/signal", Object.assign({}, opts, { where: { transport: "wifi" } }))]);
+  const rows = S.clip(conns.map(r => Object.assign({}, r, { end: r.end || new Date(now).toISOString() })), range.start, range.end)
     .sort((a, b) => b.s - a.s);
   if (rows.length === 0) { root.innerHTML = '<span class="mute">와이파이 연결 기록 없음</span>'; return; }
   root.className = "";
+  // 연결별 평균 신호 단계(시간 가중). 신호 구간은 connection_id로 연결 구간을 가리킨다
+  const fix = r => Object.assign({}, r, { end: r.end || new Date(now).toISOString() });
+  const lv = new Map();   // connection id → { w, ms }
+  for (const g of S.clip(sigs.map(fix), range.start, range.end)) {
+    const a = lv.get(g.connection_id) || { w: 0, ms: 0 }; a.w += g.level * (g.e - g.s); a.ms += g.e - g.s; lv.set(g.connection_id, a);
+  }
+  const avg = ids => { let w = 0, ms = 0; for (const id of ids) { const a = lv.get(id); if (a) { w += a.w; ms += a.ms; } } return ms ? w / ms : null; };
 
   // (1) SSID별 연결 시간(겹치는 구간은 SSID 안에서 합쳐 두 번 세지 않는다)
   const merged = S.merge(rows, name, 0);
@@ -47,7 +60,7 @@ lifelog.ready(async (range, widget) => {
   const total = S.sumMs(S.merge(rows, () => "", 0));
   const max = groups[0].ms;
   const barsHtml = groups.slice(0, ssids).map(g => `<div class="row" title="${S.esc(g.key)} ${S.fmtDur(g.ms)} · ${g.n}번">
-    <div class="bar" style="width:${Math.max(2, g.ms / max * 100)}%;background:${S.hashColor(g.key)}">${S.esc(g.key)}</div><div class="n">${S.fmtDur(g.ms)}</div></div>`).join("") +
+    <div class="bar" style="width:${Math.max(2, g.ms / max * 100)}%;background:${S.hashColor(g.key)}">${S.esc(g.key)}</div><div class="n">${sigHtml(avg(rows.filter(r => name(r) === g.key).map(r => r.id)))} ${S.fmtDur(g.ms)}</div></div>`).join("") +
     (groups.length > ssids ? `<div class="mute">… SSID ${groups.length - ssids}개 더</div>` : "");
 
   // (2) 타임라인: 와이파이에 붙어 있던 동안을 SSID 색으로. 빈 곳은 와이파이 아님(모바일 데이터·오프라인·수집기 꺼짐)
@@ -65,7 +78,7 @@ lifelog.ready(async (range, widget) => {
     const radio = [r.band, r.standard].filter(Boolean).join(" ");
     return `<tr title="${S.esc([r.security, r.ip, r.gateway && "게이트웨이 " + r.gateway, r.link_speed_mbps && r.link_speed_mbps + "Mbps"].filter(Boolean).join(" · "))}">
       <td class="t">${S.fmtTime(r.s)}–${S.fmtTime(r.e)}</td><td><span class="dot" style="background:${S.hashColor(name(r))}"></span>${S.esc(name(r))}</td>
-      <td class="d">${S.fmtDur(r.e - r.s)}</td><td class="x">${S.esc(radio)}</td><td class="x">${tags.join(" · ")}</td></tr>`;
+      <td class="d">${S.fmtDur(r.e - r.s)}</td><td>${sigHtml(avg([r.id]))}</td><td class="x">${S.esc(radio)}</td><td class="x">${tags.join(" · ")}</td></tr>`;
   }).join("")}</table>` + (rows.length > limit ? `<div class="mute">… ${rows.length - limit}개 더</div>` : "");
 
   root.innerHTML = `<h3>SSID별 연결 시간 · 합계 ${S.fmtDur(total)} (하루의 ${Math.round(total / span * 100)}%)</h3>${barsHtml}

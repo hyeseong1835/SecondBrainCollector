@@ -1,0 +1,23 @@
+{
+  "type": "renderer",
+  "id": "widget-signal",
+  "version": "1.0.0",
+  "name": "신호 세기",
+  "description": "휴대폰 와이파이·모바일 신호 단계(0~4) 타임라인, 평균 단계, 약한 신호 시간, 단계별 비율과 dBm 범위",
+  "min_host_version": 1,
+  "runtimes": {
+    "webview": "index.html"
+  },
+  "slot": "card",
+  "inputs": [
+    "phone-network/signal@1"
+  ],
+  "settings": [
+    {
+      "key": "device",
+      "type": "string",
+      "default": "",
+      "label": "기기 (비우면 전부)"
+    }
+  ]
+}

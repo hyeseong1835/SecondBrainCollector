@@ -31,15 +31,24 @@ const DEFAULT_WIDGETS = [
   { type: "widget-heart-rate", x: 10, y: 15, w: 5, h: 5 },
   { type: "widget-stress", x: 15, y: 15, w: 5, h: 5 },
   { type: "widget-notifications", x: 0, y: 20, w: 10, h: 6 },
-  { type: "widget-wifi", x: 10, y: 20, w: 10, h: 6 },
 ];
 const defaultWidgets = () => DEFAULT_WIDGETS.map(w => Object.assign({ id: uid(), settings: {} }, w));
-const DEFAULT_VIEWS = [{ id: "default", name: "기본", widgets: DEFAULT_WIDGETS.map((w, i) => Object.assign({ id: "w" + (i + 1), settings: {} }, w)) }];
+const NETWORK_WIDGETS = [
+  { type: "widget-internet", x: 0, y: 0, w: 10, h: 6 },
+  { type: "widget-signal", x: 10, y: 0, w: 10, h: 6 },
+  { type: "widget-wifi", x: 0, y: 6, w: 10, h: 6 },
+  { type: "widget-cellular", x: 10, y: 6, w: 10, h: 6 },
+];
+const DEFAULT_VIEWS = [
+  { id: "default", name: "기본", widgets: DEFAULT_WIDGETS.map((w, i) => Object.assign({ id: "w" + (i + 1), settings: {} }, w)) },
+  { id: "network", name: "네트워크", widgets: NETWORK_WIDGETS.map((w, i) => Object.assign({ id: "n" + (i + 1), settings: {} }, w)) },
+];
 // 휴대폰 첫 화면: 한 줄로 쌓이므로 순서대로 y만 늘린다
 const column = list => { let y = 0; return list.map((w, i) => { const o = Object.assign({ id: "m" + (i + 1), x: 0, y, w: 5, settings: {} }, w); y += o.h; return o; }); };
 const DEFAULT_MOBILE_VIEWS = [
-  { id: "today", name: "오늘", widgets: column([{ type: "widget-summary", h: 4 }, { type: "widget-categories", h: 5 }, { type: "widget-top-apps", h: 5 }, { type: "widget-hourly", h: 4 }, { type: "widget-location", h: 5 }, { type: "widget-media", h: 4 }, { type: "widget-notifications", h: 6 }, { type: "widget-wifi", h: 6 }]) },
+  { id: "today", name: "오늘", widgets: column([{ type: "widget-summary", h: 4 }, { type: "widget-categories", h: 5 }, { type: "widget-top-apps", h: 5 }, { type: "widget-hourly", h: 4 }, { type: "widget-location", h: 5 }, { type: "widget-media", h: 4 }, { type: "widget-notifications", h: 6 }]) },
   { id: "health", name: "건강", widgets: column([{ type: "widget-shealth", h: 4 }, { type: "widget-sleep", h: 5 }, { type: "widget-steps", h: 4 }, { type: "widget-heart-rate", h: 4 }, { type: "widget-activity", h: 3 }, { type: "widget-energy-score", h: 4 }]) },
+  { id: "network", name: "네트워크", widgets: column([{ type: "widget-internet", h: 6 }, { type: "widget-wifi", h: 6 }, { type: "widget-cellular", h: 5 }, { type: "widget-signal", h: 6 }]) },
 ];
 
 function dayRange(offset) {
@@ -223,7 +232,7 @@ async function load() {
     };
     add.querySelector("#resetView").onclick = async () => {
       if (!confirm(`뷰 "${view.name}"의 위젯을 기본 구성으로 되돌릴까요?`)) return;
-      view.widgets = mobile ? JSON.parse(JSON.stringify((DEFAULT_MOBILE_VIEWS.find(v => v.id === view.id) || DEFAULT_MOBILE_VIEWS[0]).widgets)) : defaultWidgets();
+      view.widgets = mobile ? JSON.parse(JSON.stringify((DEFAULT_MOBILE_VIEWS.find(v => v.id === view.id) || DEFAULT_MOBILE_VIEWS[0]).widgets)) : view.id === "network" ? NETWORK_WIDGETS.map(w => Object.assign({ id: uid(), settings: {} }, w)) : defaultWidgets();
       await saveSettings(); load();
     };
     add.querySelector("#renameView").onclick = async () => { const n = prompt("뷰 이름", view.name); if (n) { view.name = n; await saveSettings(); load(); } };
