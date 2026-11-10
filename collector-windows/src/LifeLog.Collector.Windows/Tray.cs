@@ -31,13 +31,13 @@ public sealed class Tray : IDisposable
     private void Loop()
     {
         var menu = new ContextMenuStrip();
-        var status = new ToolStripMenuItem("LifeLog 수집기") { Enabled = false };
+        var status = new ToolStripMenuItem("세컨뇌 수집기") { Enabled = false };
         menu.Items.Add(status);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("로그 폴더 열기", null, (_, _) => Process.Start(new ProcessStartInfo("explorer.exe", Config.Dir) { UseShellExecute = true }));
         menu.Items.Add("종료", null, (_, _) => _quit());
         menu.Opening += (_, _) => status.Text = _status();
-        _icon = new NotifyIcon { Icon = SystemIcons.Application, Text = "LifeLog 수집기", Visible = true, ContextMenuStrip = menu };
+        _icon = new NotifyIcon { Icon = SystemIcons.Application, Text = "세컨뇌 수집기", Visible = true, ContextMenuStrip = menu };
         Application.Run();
         _icon.Visible = false;
         _icon.Dispose();

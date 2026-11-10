@@ -19,7 +19,7 @@ internal sealed class DbApi : IDisposable
     {
         _http = new HttpClient { BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(30) };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", key.Trim());
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("lifelog-collector/api");
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("secondbrain-collector/api");
     }
 
     static string E(string s) => Uri.EscapeDataString(s);

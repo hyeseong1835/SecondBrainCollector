@@ -39,7 +39,7 @@
     </queries>
 
     <application
-        android:label="LifeLog 수집기"
+        android:label="세컨뇌 수집기"
         android:icon="@android:drawable/ic_menu_recent_history"
         android:theme="@android:style/Theme.Material.NoActionBar"
 >
@@ -52,8 +52,8 @@
         </activity>
 
         <!-- 휴대폰 대시보드: 컴퓨터와 같은 렌더러를 쓰는 별도 아이콘(같은 앱이라 수집기의 DB 연결을 같이 쓴다) -->
-        <activity android:name=".dashboard.DashboardActivity" android:exported="true" android:label="LifeLog 대시보드"
-            android:icon="@android:drawable/ic_menu_gallery" android:taskAffinity="dev.hyeseong.lifelog.dashboard"
+        <activity android:name=".dashboard.DashboardActivity" android:exported="true" android:label="세컨뇌 대시보드"
+            android:icon="@android:drawable/ic_menu_gallery" android:taskAffinity="dev.hyeseong.secondbrain.dashboard"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

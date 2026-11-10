@@ -50,7 +50,7 @@ class DashboardActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val cfg = Config(this)
-        if (!cfg.isComplete) { setContentView(TextView(this).apply { text = "DB 연결 설정이 없습니다. LifeLog 수집기 앱의 연결 탭에서 먼저 설정하세요."; setPadding(48, 96, 48, 48) }); return }
+        if (!cfg.isComplete) { setContentView(TextView(this).apply { text = "연결 설정이 없습니다. 세컨뇌 수집기 앱의 연결 탭에서 먼저 설정하세요."; setPadding(48, 96, 48, 48) }); return }
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) { setContentView(TextView(this).apply { text = "이 휴대폰의 WebView가 너무 오래됐습니다. Android System WebView를 업데이트하세요."; setPadding(48, 96, 48, 48) }); return }
         WebView.setWebContentsDebuggingEnabled(true)
         web = WebView(this)

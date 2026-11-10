@@ -10,7 +10,7 @@ return await Cli.RunAsync(args);
 static class Cli
 {
     const string Usage = """
-        lifelog-collector <명령>
+        secondbrain-collector <명령>   (세컨뇌 수집기. 2026-11-11 lifelog-collector에서 이름 바꿈)
 
           setup   --device ID --name 이름 --host H --port P --database DB [--no-ssl] [--tenant 프로젝트ref]
                   --tenant: Supabase 풀러는 사용자 이름이 롤.프로젝트ref 꼴이어야 한다. 맨 Postgres면 생략
@@ -28,19 +28,21 @@ static class Cli
           autostart on|off   로그온 시 자동 실행(HKCU Run 키)
           status  설정·큐·플러그인 상태
 
-        로그: %LOCALAPPDATA%\LifeLog\collector\collector.log
+        로그: %LOCALAPPDATA%\SecondBrain\collector\collector.log (옛 %LOCALAPPDATA%\LifeLog\collector는 처음 실행 때 옮긴다)
         """;
 
-    const string StopEventName = @"Local\LifeLog.Collector.Stop";
-    const string MutexName = @"Local\LifeLog.Collector.Running";
-    const string ReloadEventName = @"Local\LifeLog.Collector.Reload";
-    const string TaskName = "LifeLogCollector";
+    const string StopEventName = @"Local\SecondBrain.Collector.Stop";
+    const string MutexName = @"Local\SecondBrain.Collector.Running";
+    const string ReloadEventName = @"Local\SecondBrain.Collector.Reload";   // 데스크톱(LifeLogBridge)도 이 이름을 쓴다
+    const string TaskName = "SecondBrainCollector";
+    const string OldTaskName = "LifeLogCollector";
 
     public static async Task<int> RunAsync(string[] args)
     {
         if (args.Length == 0) { Console.WriteLine(Usage); return 1; }
         try
         {
+            Config.MoveFromOldRoot();
             switch (args[0])
             {
                 case "setup": return await SetupAsync(args[1..], reset: false);
@@ -220,6 +222,7 @@ static class Cli
         // 작업 스케줄러의 onlogon 트리거는 관리자 권한이 필요해 HKCU Run 키를 쓴다(사용자 권한으로 충분)
         var exe = Environment.ProcessPath ?? throw new InvalidOperationException("실행 파일 경로를 알 수 없습니다");
         using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true)!;
+        key.DeleteValue(OldTaskName, false);   // 이름을 바꾸기 전의 자동 실행 항목
         if (on) { key.SetValue(TaskName, $"\"{exe}\" run --tray"); Console.WriteLine($"로그온 시 자동 실행 등록(HKCU Run): {exe} run --tray"); }
         else { key.DeleteValue(TaskName, false); Console.WriteLine("자동 실행 해제"); }
         return 0;

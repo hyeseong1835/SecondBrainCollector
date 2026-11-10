@@ -182,8 +182,8 @@ class CollectorService : Service() {
 
     private fun notification(text: String): Notification {
         val nm = getSystemService(NotificationManager::class.java)
-        if (nm.getNotificationChannel(CHANNEL) == null) nm.createNotificationChannel(NotificationChannel(CHANNEL, "LifeLog 수집기", NotificationManager.IMPORTANCE_LOW))
-        return Notification.Builder(this, CHANNEL).setContentTitle("LifeLog 수집기").setContentText(text).setSmallIcon(android.R.drawable.ic_menu_recent_history).setOngoing(true).build()
+        if (nm.getNotificationChannel(CHANNEL) == null) nm.createNotificationChannel(NotificationChannel(CHANNEL, "세컨뇌 수집기", NotificationManager.IMPORTANCE_LOW))
+        return Notification.Builder(this, CHANNEL).setContentTitle("세컨뇌 수집기").setContentText(text).setSmallIcon(android.R.drawable.ic_menu_recent_history).setOngoing(true).build()
     }
 
     // ---- JS → 호스트. 디스패처 스레드에서 불린다 ----

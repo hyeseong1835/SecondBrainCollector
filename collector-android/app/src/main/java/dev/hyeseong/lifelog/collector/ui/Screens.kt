@@ -63,7 +63,7 @@ fun StatusScreen(model: AppModel) {
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { while (true) { model.refresh(); delay(5000) } }   // 화면이 떠 있는 동안 5초마다
     Screen {
-        Text("LifeLog 수집기", style = MaterialTheme.typography.titleLarge)
+        Text("세컨뇌 수집기", style = MaterialTheme.typography.titleLarge)
         Section("수집") {
             KeyValue("상태", if (model.running) "실행 중 · ${model.status}" else "꺼짐")
             KeyValue("큐 대기", if (model.queue < 0) "-" else "${model.queue}건")

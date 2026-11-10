@@ -47,6 +47,7 @@ class MainActivity : ComponentActivity() {
             j.optString("device").takeIf { it.isNotEmpty() }?.let { cfg.device = it }
             cfg.apiUrl = j.getString("url").trimEnd('/')
             cfg.apiKey = j.getString("key").trim()
+            if (j.optBoolean("autostart", false)) cfg.autostart = true   // 패키지를 바꿔 새로 깔 때: 수집을 바로 켠다
             CollectorService.log(this, "provision.json으로 API 모드 설정(${cfg.apiUrl})")
             if (cfg.autostart && !CollectorService.running) startForegroundService(Intent(this, CollectorService::class.java))
         } catch (e: Exception) {

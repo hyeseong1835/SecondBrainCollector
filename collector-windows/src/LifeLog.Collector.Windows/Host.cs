@@ -112,7 +112,7 @@ public sealed class Host : IAsyncDisposable
 
         var upload = _uploader.RunAsync(_cts.Token);
         Status = $"수집 중 · 플러그인 {_plugins.Count}개 · 소스 {_sources.Count}개";
-        Log("수집 중. Ctrl+C 또는 `lifelog-collector stop`으로 끝냅니다.");
+        Log("수집 중. Ctrl+C 또는 `secondbrain-collector stop`으로 끝냅니다.");
         try { await Task.Delay(Timeout.Infinite, stop); } catch (OperationCanceledException) { }
 
         Status = "종료 중";

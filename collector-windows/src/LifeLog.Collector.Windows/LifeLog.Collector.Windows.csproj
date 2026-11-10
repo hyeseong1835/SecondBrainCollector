@@ -6,7 +6,7 @@
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>lifelog-collector</AssemblyName>
+    <AssemblyName>secondbrain-collector</AssemblyName>
     <RootNamespace>LifeLog.Collector.Windows</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
     <UseWindowsForms>true</UseWindowsForms>

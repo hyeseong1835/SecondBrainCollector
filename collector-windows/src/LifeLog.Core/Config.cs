@@ -13,7 +13,26 @@ public sealed class Config
 {
     /// <summary>앱 이름. 수집기는 "collector", 대시보드는 "dashboard". 시작 시 한 번 정한다.</summary>
     public static string AppName { get; set; } = "collector";
-    public static string Root { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LifeLog");
+    private static string LocalAppData => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+    /// <summary>자료 폴더 %LOCALAPPDATA%\SecondBrain\{collector,dashboard}. 2026-11-11 세컨뇌로 이름을 바꾸기 전에는 %LOCALAPPDATA%\LifeLog였다.</summary>
+    public static string Root { get; } = Path.Combine(LocalAppData, "SecondBrain");
+    public static string OldRoot { get; } = Path.Combine(LocalAppData, "LifeLog");
+
+    /// <summary>
+    /// 옛 폴더(LifeLog\collector·dashboard)를 새 곳으로 옮긴다. 새 곳에 이미 있으면 건드리지 않는다.
+    /// 옛 수집기·대시보드가 파일을 잡고 있으면 IOException(먼저 멈춘다). LifeLog\vscode(VS Code 수집기가 쓰는 곳)는 그대로 둔다.
+    /// </summary>
+    public static void MoveFromOldRoot()
+    {
+        foreach (var app in new[] { "collector", "dashboard" })
+        {
+            var from = Path.Combine(OldRoot, app);
+            var to = Path.Combine(Root, app);
+            if (!Directory.Exists(from) || Directory.Exists(to)) continue;
+            Directory.CreateDirectory(Root);
+            Directory.Move(from, to);
+        }
+    }
     public static string Dir => Path.Combine(Root, AppName);
     public static string PluginsDir => Path.Combine(Dir, "plugins");
     public static string QueuePath => Path.Combine(Dir, "queue.db");
@@ -78,7 +97,7 @@ public sealed class Config
             Host = Host, Port = Port, Database = Database, Username = User, Password = GetPassword(),
             SslMode = Ssl ? Npgsql.SslMode.Require : Npgsql.SslMode.Prefer,
             Pooling = true, MaxPoolSize = 2, MinPoolSize = 0,   // 앱당 연결 하나(풀러 연결 수 한도)
-            ApplicationName = "lifelog-collector",
+            ApplicationName = "secondbrain-collector",
         };
         return b.ConnectionString;
     }
