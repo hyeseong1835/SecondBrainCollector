@@ -15,7 +15,20 @@ let editing = params.get("edit") === "1";            // ?edit=1은 개발용
 let range = null;
 let platform = "windows";   // 호스트가 알려 준다(windows | android)
 let mobile = false;         // 한 줄 배치
-let rulesShared = false;    // 분류 규칙이 DB(모든 기기 공유)에 있는지. 0006 DB면 false(이 기기 로컬)
+let rulesShared = false;
+// 세컨뇌 데스크톱 안(?embed=1): 뷰 목록은 데스크톱 사이드바가 보여 주므로 탭은 편집할 때만 보인다. ?view=id로 시작 뷰
+const embed = params.get("embed") === "1";
+// 세컨뇌 위젯(SecondBrainDesktop/widgets)이 있으면 처음 한 번 넣는 뷰. 할 일 화면이 대시보드의 페이지가 된다
+const SB_VIEWS = [
+  { id: "sb-todo", name: "할 일", widgets: [
+    { id: "s1", type: "sb-doable", x: 0, y: 0, w: 10, h: 9, settings: {} },
+    { id: "s2", type: "sb-assignments", x: 10, y: 0, w: 10, h: 5, settings: {} },
+    { id: "s3", type: "sb-cleanup", x: 10, y: 5, w: 10, h: 4, settings: {} },
+    { id: "s4", type: "sb-log", x: 0, y: 9, w: 20, h: 4, settings: {} } ] },
+  { id: "sb-all", name: "할 일 목록", widgets: [
+    { id: "s5", type: "sb-tasks", x: 0, y: 0, w: 12, h: 11, settings: {} },
+    { id: "s6", type: "sb-closed", x: 12, y: 0, w: 8, h: 11, settings: {} } ] },
+];    // 분류 규칙이 DB(모든 기기 공유)에 있는지. 0006 DB면 false(이 기기 로컬)
 
 const DEFAULT_WIDGETS = [
   { type: "builtin:timeline", x: 0, y: 0, w: 20, h: 5 },
@@ -366,6 +379,10 @@ function renderTabs() {
     b.title = "더블클릭: 이름 바꾸기";
     b.ondblclick = async () => { const v = settings.views.find(x => x.id === b.dataset.view); const n = prompt("뷰 이름", v.name); if (n && n !== v.name) { v.name = n; await saveSettings(); renderTabs(); } };
   });
+  if (embed) {
+    const sig = JSON.stringify([settings.views.map(v => [v.id, v.name]), viewId]);
+    if (sig !== renderTabs.sent) { renderTabs.sent = sig; lifelog._hostViews(settings.views.map(v => ({ id: v.id, name: v.name })), viewId); }
+  }
   const add = $("#addView");
   if (add) add.onclick = async () => { const n = prompt("새 뷰 이름"); if (!n) return; const v = { id: uid(), name: n, widgets: [] }; settings.views.push(v); viewId = v.id; await saveSettings(); load(); };
 }
@@ -656,6 +673,7 @@ async function init() {
     try { platform = await lifelog.platform(); } catch (_) { platform = "windows"; }
     mobile = platform === "android" || params.get("mobile") === "1" || matchMedia("(max-width: 700px)").matches;   // ?mobile=1은 개발용
     document.body.classList.toggle("mobile", mobile);
+    document.body.classList.toggle("embed", embed);
     for (const [id, t] of [["edit", "편집"], ["settings", "설정"], ["plugins", "플러그인"], ["reload", "새로고침"]]) setLabel($("#" + id), t);
     settings = Object.assign(settings, await lifelog.settings());
     rulesShared = !!settings.rules_shared;
@@ -666,9 +684,13 @@ async function init() {
     for (const key of migrateRules()) await lifelog.setRules(key === "categories" ? "pc" : "phone", pruneRules(settings[key]));   // 옛 자식 규칙을 부모 밖으로
     if (!settings.grid || !settings.grid.cell) { settings.grid = { cell: 60, gap: 10 }; await saveSettings(); }
     applyTheme();
-    if (!viewId) viewId = settings.views[0].id;
     outputs = await lifelog.outputs();
     renderers = await lifelog.renderers();
+    if (!settings.sb_views && platform === "windows" && renderers.some(r => r.id === "sb-doable")) {
+      settings.views = JSON.parse(JSON.stringify(SB_VIEWS)).filter(v => !settings.views.some(x => x.id === v.id)).concat(settings.views);
+      settings.sb_views = 1; await saveSettings();
+    }
+    if (!viewId) viewId = (settings.views.find(v => v.id === params.get("view")) || settings.views[0]).id;
     $("#info").textContent = `기기 ${await lifelog.device()}` + (mobile ? "" : ` · ${platformName(platform)}`);
     await load();
   } catch (e) {
@@ -690,7 +712,9 @@ $("#prev").onclick = () => { dayOffset--; showPage("main"); load(); };
 $("#next").onclick = () => { dayOffset++; showPage("main"); load(); };
 $("#today").onclick = () => { dayOffset = 0; showPage("main"); load(); };
 $("#reload").onclick = init;
-$("#edit").onclick = () => { editing = !editing; $("#edit").classList.toggle("on", editing); load(); };
+$("#edit").onclick = () => { editing = !editing; $("#edit").classList.toggle("on", editing); document.body.classList.toggle("editing", editing); load(); };
+window.addEventListener("lifelog:selectView", e => { if (e.detail === viewId && $("#main").style.display !== "none") return; if (!settings.views.some(v => v.id === e.detail)) return; viewId = e.detail; showPage("main"); load(); });
+window.addEventListener("lifelog:refresh", () => { if ($("#main").style.display !== "none") load(); });
 $("#settings").onclick = () => showPage($("#settingsPage").style.display === "block" ? "main" : "settingsPage");
 window.addEventListener("message", e => {
   const d = e.data;

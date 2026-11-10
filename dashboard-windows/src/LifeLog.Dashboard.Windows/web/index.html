@@ -110,6 +110,9 @@
   dialog .row { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
   .plat { display:inline-block; padding:0 5px; margin:1px 2px 1px 0; border-radius:8px; font-size:11px; border:1px solid var(--btn-border); color:var(--mute); }
   .req { font-size:11px; }
+  /* 세컨뇌 데스크톱 안: 제목과 뷰 탭은 사이드바가 맡는다(편집 중에는 탭을 보여 뷰를 더하고 이름을 바꾼다) */
+  body.embed header h1 { display:none; }
+  body.embed:not(.editing) #tabs { display:none; }
   /* 휴대폰(한 줄 배치): 위젯을 세로로 쌓고, 머리줄·설정 사이드바를 좁은 화면에 맞춘다 */
   .board.column { display:flex; flex-direction:column; gap:10px; }
   .board.column .widget { position:relative; width:100%; }
