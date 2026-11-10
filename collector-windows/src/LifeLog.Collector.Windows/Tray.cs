@@ -36,9 +36,9 @@ public sealed class Tray : IDisposable
         var status = new ToolStripMenuItem("SecondBrain Collector") { Enabled = false };
         menu.Items.Add(status);
         menu.Items.Add(new ToolStripSeparator());
-        // 디스코드 봇 녹음 켜고 끄기(discord.json의 bot_enabled). 켜져 있으면 내가 음성 채널에 들어갈 때 봇이 따라 들어가 사람별로 저장한다
+        // 디스코드 봇 녹음 켜고 끄기(플러그인 win-discord-bot 설정 enabled, DB에도 쓴다). 켜져 있으면 내가 음성 채널에 들어갈 때 봇이 따라 들어가 사람별로 저장한다
         var bot = new ToolStripMenuItem("디스코드 봇 녹음") { CheckOnClick = false };
-        bot.Click += (_, _) => DiscordSettings.Update(s => s.BotEnabled = !s.BotEnabled);
+        bot.Click += (_, _) => DiscordSettings.SetBotEnabled(!DiscordSettings.Load().BotEnabled);
         var botStatus = new ToolStripMenuItem("") { Enabled = false };
         menu.Items.Add(bot);
         menu.Items.Add(botStatus);

@@ -1,6 +1,8 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Jint.Native;
 using LifeLog.Collector.Windows.Sources;
+using LifeLog.Collector.Windows.Sources.Recording;
 using LifeLog.Core;
 
 namespace LifeLog.Collector.Windows;
@@ -91,6 +93,7 @@ public sealed class Host : IAsyncDisposable
             }
         }
         if (_plugins.Count == 0) Log("켜진 플러그인이 없습니다. `install`로 플러그인을 넣고 `enable`로 켜세요.");
+        await ApplyDiscordSettingsAsync();
 
         // 플러그인 start (디스패처에서)
         foreach (var p in _plugins)
@@ -154,6 +157,51 @@ public sealed class Host : IAsyncDisposable
         if (!HasCapability(p, cap)) throw new InvalidOperationException($"권한이 허용되지 않았습니다: {cap}");
     }
     public JsonElement SettingsOf(JsPlugin p) => _installs[p.Manifest.Id].Settings;
+
+    /// <summary>
+    /// 디스코드 소스(네이티브)에 플러그인 설정을 넣는다. 옛 discord.json이 있으면 비어 있는 설정 칸만 채우고 토큰은 비밀값 저장소로 옮긴다.
+    /// 트레이의 봇 켜고 끄기가 DB에도 쓰도록 Persist를 건다.
+    /// </summary>
+    private async Task ApplyDiscordSettingsAsync()
+    {
+        try
+        {
+            if (DiscordSettings.TakeLegacy() is { } old)
+            {
+                var done = true;
+                if (old.OutputDevice.Length > 0) done &= await SetSettingIfEmptyAsync(DiscordSettings.OutputPlugin, "output_device", old.OutputDevice);
+                if (old.TargetUser.Length > 0) done &= await SetSettingIfEmptyAsync(DiscordSettings.BotPlugin, "target_user_id", old.TargetUser);
+                if (done) { DiscordSettings.RetireLegacy(); Log("[discord] 옛 discord.json을 플러그인 설정·비밀값 저장소로 옮김"); }
+            }
+        }
+        catch (Exception e) { Log($"[discord] 옛 설정 옮기기 실패: {e.Message}"); }
+        DiscordSettings.Apply(_installs.GetValueOrDefault(DiscordSettings.OutputPlugin)?.Settings, _installs.GetValueOrDefault(DiscordSettings.BotPlugin)?.Settings);
+        DiscordSettings.Persist = async (plugin, key, value) =>
+        {
+            try { await SetSettingAsync(plugin, key, value); }
+            catch (Exception e) { Log($"[{plugin}] 설정 저장 실패: {e.Message}"); }
+        };
+    }
+
+    /// <summary>설정 칸이 선언돼 있고(새 매니페스트로 설치됨) 비어 있을 때만 채운다. 선언 전이면 false(다음 실행 때 다시).</summary>
+    private async Task<bool> SetSettingIfEmptyAsync(string plugin, string key, string value)
+    {
+        if (!_installs.TryGetValue(plugin, out var inst) || inst.Settings.ValueKind != JsonValueKind.Object || !inst.Settings.TryGetProperty(key, out var cur)) return false;
+        if (cur.ValueKind == JsonValueKind.String && cur.GetString()!.Length > 0) return true;
+        await SetSettingAsync(plugin, key, JsonValue.Create(value));
+        return true;
+    }
+
+    /// <summary>이 기기의 설치 설정 한 칸을 바꿔 DB에 쓰고 메모리 사본도 고친다.</summary>
+    public async Task SetSettingAsync(string plugin, string key, JsonNode? value)
+    {
+        var inst = _installs.GetValueOrDefault(plugin) ?? await Db.GetInstallAsync(plugin, Config.Device) ?? throw new InvalidOperationException("설치되지 않은 플러그인: " + plugin);
+        var o = JsonNode.Parse(inst.Settings.ValueKind == JsonValueKind.Object ? inst.Settings.GetRawText() : "{}")!.AsObject();
+        o[key] = value?.DeepClone();
+        var json = o.ToJsonString();
+        await Db.SetInstallAsync(plugin, Config.Device, inst.InstalledVersion, inst.Enabled, json, JsonSerializer.Serialize(inst.Granted));
+        _installs[plugin] = inst with { Settings = JsonDocument.Parse(json).RootElement.Clone() };
+    }
     public IEnumerable<string> GrantedOf(JsPlugin p) => _installs.TryGetValue(p.Manifest.Id, out var i) ? i.Granted : [];
 
     public JsonElement? StateGet(JsPlugin p, string key) => Db.StateGetAsync(p.Manifest.Id, Config.Device, key).GetAwaiter().GetResult();

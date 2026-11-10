@@ -63,6 +63,32 @@
   .settings .field { margin:14px 0 18px; }
   .settings .field b { display:block; font-weight:600; margin-bottom:2px; }
   .settings .field p { margin:0 0 6px; }
+  /* 설정 › 플러그인·수집기 관리(settings-plugins.js) */
+  .settings .ssearch { margin:0 4px 6px; padding:5px 8px; border:1px solid var(--btn-border); border-radius:6px; background:transparent; color:inherit; }
+  .settings .side .badge { color:#e0a030; font-weight:700; }
+  .settings h3 { font-size:14px; margin:20px 0 6px; color:var(--mute); font-weight:600; }
+  .settings .small { font-size:11px; }
+  .settings .devtabs { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0 4px; }
+  .settings .devtabs button.on { background:var(--on); border-color:var(--accent); }
+  .settings .setting { padding:8px 12px 10px; margin:2px 0; border-left:2px solid transparent; border-radius:2px; }
+  .settings .setting:hover { background:color-mix(in srgb, var(--btn-hover) 50%, transparent); }
+  .settings .setting.modified { border-left-color:var(--accent); }
+  .settings .setting .st { display:flex; align-items:center; gap:6px; }
+  .settings .setting .st b { display:inline; margin:0; }
+  .settings .setting .cat { color:var(--mute); }
+  .settings .setting p { margin:2px 0 6px; }
+  .settings .setting .reset { padding:0 6px; line-height:18px; }
+  .settings .setting textarea { width:min(560px, 100%); font:12px Consolas, "Cascadia Mono", monospace; }
+  .settings .setting .msg { color:var(--mute); font-size:12px; }
+  .settings .check { display:inline-flex; gap:6px; align-items:center; }
+  .settings .meter { position:relative; height:14px; border:1px solid var(--line); border-radius:7px; overflow:hidden; max-width:640px; margin:8px 0 4px; }
+  .settings .meter .fill { height:100%; background:var(--accent); }
+  .settings .meter .fill.bad { background:#e0a030; }
+  .settings .meter .mark { position:absolute; top:0; bottom:0; width:2px; background:#e5645a; }
+  table.unmatched tr.excluded td { opacity:.6; }
+  table.unmatched td.tools { white-space:nowrap; }
+  .sbwarn { background:color-mix(in srgb, #e0a030 22%, transparent); border-bottom:1px solid #e0a030; padding:6px 12px; font-size:13px; }
+  .sbwarn button { margin-left:8px; }
   table.unmatched { border-collapse:collapse; width:100%; margin-top:6px; }
   table.unmatched th, table.unmatched td { text-align:left; vertical-align:top; padding:4px 8px; border-top:1px solid var(--line); font-size:12px; }
   table.unmatched th { color:var(--mute); font-weight:500; }
@@ -159,5 +185,6 @@
 <script src="sdk.js"></script>
 <script src="shell.js"></script>
 <script src="plugins.js"></script>
+<script src="settings-plugins.js"></script>
 </body>
 </html>

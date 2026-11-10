@@ -11,8 +11,8 @@ namespace LifeLog.Collector.Windows.Sources;
 /// 디스코드 봇 녹음(2026-11-11, 켰을 때만). HearingAid와 같은 봇이 대상 사용자(나)가 있는 음성 채널을 따라 들어가
 /// <b>말하는 사람별로</b> 오디오를 저장한다. 실시간 전사는 하지 않는다. 대상이 채널을 옮기면 따라가고 나가면 봇도 나간다.
 ///
-/// - 켜고 끄기: discord.json의 bot_enabled(트레이 메뉴 "디스코드 봇 녹음" 또는 `secondbrain-collector discord-bot on|off`).
-/// - 토큰·대상 사용자 ID: `secondbrain-collector discord-token`으로 사용자가 직접 넣는다(DPAPI). 여기서는 메모리에서만 쓴다.
+/// - 켜고 끄기: 플러그인 win-discord-bot 설정 enabled(데스크톱 설정 › 플러그인, 트레이 메뉴 "디스코드 봇 녹음", `secondbrain-collector discord-bot on|off`).
+/// - 대상 사용자 ID는 설정 target_user_id, 봇 토큰은 비밀값 bot_token(DPAPI, 데스크톱 설정 화면 또는 `discord-token`). 토큰은 메모리에서만 쓴다.
 /// - 사람마다 파일: Opus(48kHz) → 16kHz 모노 → AAC 32kbps. 패킷이 5초 끊기면 그 사람의 파일을 닫고 다음 말부터 새 파일.
 ///   5초 안의 끊김은 무음으로 채워 파일 안 시각이 실제 시각과 맞는다. 30분이면 나눈다.
 /// - 위치: %USERPROFILE%\SecondBrainRecordings\discord-bot\yyyy-MM-dd\yyyyMMdd-HHmmss-&lt;사용자ID&gt;-xxxxxxxx.m4a
@@ -59,15 +59,15 @@ public sealed class DiscordBotSource : ISource
 
     private void OnSettingsChanged(DiscordSettings s) => _ = ApplyAsync(s.BotEnabled);
 
-    /// <summary>다른 프로세스(`discord-bot on|off`)가 바꾼 설정은 파일 시각으로 알아챈다. 끊긴 파일 닫기도 여기서.</summary>
+    /// <summary>설정(다시 읽기로 새로 들어온 값)·비밀값 파일이 바뀌면 다시 적용한다. 끊긴 파일 닫기도 여기서.</summary>
     private async Task WatchAsync()
     {
-        var seen = DateTime.MinValue;
+        string? seen = null;
         while (!_cts.IsCancellationRequested)
         {
             try
             {
-                var t = DiscordSettings.FileTime;
+                var t = DiscordSettings.Signature;
                 if (t != seen) { seen = t; await ApplyAsync(DiscordSettings.Load().BotEnabled); }
                 CloseIdle(DateTimeOffset.Now);
             }
@@ -92,7 +92,7 @@ public sealed class DiscordBotSource : ISource
     private async Task StartBotAsync()
     {
         var s = DiscordSettings.Load();
-        if (!s.HasBotCredentials) { StatusText = "토큰 없음(discord-token)"; _log("[discord-bot] 토큰·대상 사용자가 없습니다. `secondbrain-collector discord-token`으로 넣으세요"); return; }
+        if (!s.HasBotCredentials) { StatusText = "토큰·대상 사용자 없음(설정 › 플러그인)"; _log("[discord-bot] 봇 토큰이나 따라갈 사용자 ID가 없습니다. 데스크톱 설정 › 플러그인 › 디스코드 봇 녹음에서 넣으세요"); return; }
         var (token, target) = s.GetBotCredentials();
         _target = target;
         var c = new GatewayClient(new BotToken(token), new GatewayClientConfiguration { Intents = GatewayIntents.Guilds | GatewayIntents.GuildVoiceStates });

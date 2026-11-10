@@ -98,6 +98,11 @@
     setEnabled: (id, on) => call("setEnabled", id, on),
     reloadCollector: () => call("reloadCollector"),
     device: () => call("device"),
+    // 설정 › 플러그인·수집기 관리(셸만, 데스크톱 호스트). admin(method, path, body)는 /api/collector/admin/<path>
+    admin: (method, path, body) => call("collectorAdmin", method, path, body ?? null),
+    secrets: plugin => call("secrets", plugin),
+    setSecret: (plugin, key, value) => call("setSecret", plugin, key, value ?? null),
+    audioOutputs: () => call("audioOutputs"),
     /**
      * SecondBrain 데이터(SecondBrainDesktop 호스트만). 매니페스트 capabilities에 read:sb_tasks(할 일 읽기)·read:sb_log(트레이 로그 읽기)·
      * read:sb_task_write(상태 바꾸기·편집 창 열기)를 선언한 위젯만 부를 수 있다.

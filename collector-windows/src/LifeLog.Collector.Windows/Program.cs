@@ -28,8 +28,8 @@ static class Cli
           autostart on|off   로그온 시 자동 실행(HKCU Run 키)
           status  설정·큐·플러그인 상태
 
-          디스코드 녹음(플러그인 win-discord-output·win-discord-bot):
-          discord-devices          렌더(출력) 장치 목록과 지금 고른 장치
+          디스코드 녹음(플러그인 win-discord-output·win-discord-bot. 데스크톱 설정 › 플러그인에서도 바꾼다):
+          discord-devices [--json] 렌더(출력) 장치 목록과 지금 고른 장치
           discord-device <이름 일부|ID>   상시 녹음할 장치를 정한다(루프백). 실행 중이면 10초 안에 다시 붙는다
           discord-token            봇 토큰과 따라갈 사용자 ID를 직접 입력해 DPAPI로 저장(화면에 표시하지 않음)
           discord-bot on|off       봇 녹음 켜기/끄기(트레이 메뉴와 같다)
@@ -63,11 +63,11 @@ static class Cli
                 case "autostart": return Autostart(args.Length > 1 && args[1] == "on");
                 case "set-tenant": return SetTenant(args.Length > 1 ? args[1] : "");
                 case "status": return await StatusAsync();
-                case "discord-devices": return DiscordCli.Devices();
-                case "discord-device": return DiscordCli.SetDevice(string.Join(' ', args[1..]));
-                case "discord-token": return DiscordCli.Token();
+                case "discord-devices": return await DiscordCli.Devices(args.Contains("--json"));
+                case "discord-device": return await DiscordCli.SetDevice(string.Join(' ', args[1..]));
+                case "discord-token": return await DiscordCli.Token();
                 case "discord-simulate": return DiscordCli.Simulate(args[1]);
-                case "discord-bot": return DiscordCli.Bot(args.Length > 1 ? args[1] : "");
+                case "discord-bot": return await DiscordCli.Bot(args.Length > 1 ? args[1] : "");
                 default: Console.WriteLine(Usage); return 1;
             }
         }
@@ -206,7 +206,7 @@ static class Cli
     }
 
     /// <summary>실행 중인 수집기에 플러그인 다시 읽기를 요청한다. 없으면 false.</summary>
-    static bool Reload()
+    internal static bool Reload()
     {
         if (!EventWaitHandle.TryOpenExisting(ReloadEventName, out var ev)) return false;
         using (ev) ev.Set();

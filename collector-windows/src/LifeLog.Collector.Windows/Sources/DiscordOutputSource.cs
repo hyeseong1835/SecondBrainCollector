@@ -6,7 +6,7 @@ using NAudio.Wave.SampleProviders;
 namespace LifeLog.Collector.Windows.Sources;
 
 /// <summary>
-/// 디스코드 출력 상시 녹음(2026-11-11). 디스코드가 소리를 내보내는 렌더 장치(가상 케이블 등, discord.json의 output_device)를
+/// 디스코드 출력 상시 녹음(2026-11-11). 디스코드가 소리를 내보내는 렌더 장치(가상 케이블 등, 플러그인 win-discord-output 설정 output_device)를
 /// WASAPI 루프백으로 계속 듣다가 소리 있는 구간만 파일로 남긴다. 구간 규칙은 폰 녹음(collector-android AudioSource.kt)과 같다.
 ///
 /// - 16kHz 모노로 바꿔 50ms 프레임마다 dBFS를 잰다. 소음 바닥은 조용하면 빨리 내려가고 시끄러우면 천천히 오른다.
@@ -65,7 +65,7 @@ public sealed class DiscordOutputSource : ISource
     private void CaptureOnce()
     {
         var key = DiscordSettings.Load().OutputDevice;
-        if (string.IsNullOrWhiteSpace(key)) throw new InvalidOperationException("장치가 정해지지 않았습니다. `secondbrain-collector discord-device <이름>`");
+        if (string.IsNullOrWhiteSpace(key)) throw new InvalidOperationException("장치가 정해지지 않았습니다. 데스크톱 설정 › 플러그인 › 디스코드 출력 녹음에서 고르세요");
         using var en = new MMDeviceEnumerator();
         using var device = FindDevice(en, key);
         using var recorder = new WasapiRecorderBuilder().WithLoopbackCapture().WithDevice(device).Build();
@@ -96,7 +96,7 @@ public sealed class DiscordOutputSource : ISource
         var frame = new short[Frame];
         var needed = recorder.WaveFormat.AverageBytesPerSecond / 20;
         long silentClock = Environment.TickCount64;   // 무음 프레임을 넣은 시각(데이터가 없을 때만 쓴다)
-        var settingsTime = DiscordSettings.FileTime;
+        var settingsSig = DiscordSettings.Signature;
         long settingsCheck = 0;
         try
         {
@@ -106,9 +106,9 @@ public sealed class DiscordOutputSource : ISource
                 if (Environment.TickCount64 - settingsCheck > 2000)
                 {
                     settingsCheck = Environment.TickCount64;
-                    if (DiscordSettings.FileTime != settingsTime)
+                    if (DiscordSettings.Signature != settingsSig)
                     {
-                        settingsTime = DiscordSettings.FileTime;
+                        settingsSig = DiscordSettings.Signature;
                         if (DiscordSettings.Load().OutputDevice != key) { _log("[discord-output] 장치가 바뀌어 다시 붙습니다"); break; }
                     }
                 }

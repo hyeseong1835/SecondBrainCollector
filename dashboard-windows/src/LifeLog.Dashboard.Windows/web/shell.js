@@ -427,14 +427,19 @@ function suggestName(key, titles) {
 
 function renderSettingsPage() {
   const page = $("#settingsPage");
-  page.innerHTML = `<div class="settings"><nav class="side">${(() => {
+  // 플러그인·수집기 관리 묶음(settings-plugins.js, 데스크톱 호스트에서만)은 목록을 비동기로 받아 오면 다시 그린다
+  const SP = window.SettingsPlugins && window.SettingsPlugins.available() ? window.SettingsPlugins : null;
+  const all = [...SECTIONS, ...(SP ? SP.sections(() => renderSettingsPage()) : [])];
+  page.innerHTML = `<div class="settings"><nav class="side">${SP ? SP.searchBox() : ""}${(() => {
     let html = "", g = null;
-    for (const s of SECTIONS) { if (s.group !== g) { g = s.group; html += `<div class="group">${esc(g)}</div>`; } html += `<button class="item ${s.id === settingsSection ? "on" : ""}" data-sec="${s.id}">${esc(s.name)}</button>`; }
+    for (const s of all) { if (s.group !== g) { g = s.group; html += `<div class="group">${esc(g)}</div>`; } html += `<button class="item ${s.id === settingsSection ? "on" : ""}" data-sec="${esc(s.id)}" title="${esc(s.title || s.name)}">${esc(s.name)}${s.badge ? ` <span class="badge">${esc(s.badge)}</span>` : ""}</button>`; }
     return html;
   })()}</nav><div class="content" id="settingsContent"></div></div>`;
-  page.querySelectorAll("[data-sec]").forEach(b => b.onclick = () => { settingsSection = b.dataset.sec; renderSettingsPage(); });
+  page.querySelectorAll("[data-sec]").forEach(b => b.onclick = () => { settingsSection = b.dataset.sec; if (SP) SP.clearSearch(); renderSettingsPage(); });
   const c = $("#settingsContent");
-  if (settingsSection === "general") renderGeneral(c);
+  if (SP) SP.bindSearch(page, () => renderSettingsPage());
+  if (SP && SP.owns(settingsSection)) SP.render(c, settingsSection);
+  else if (settingsSection === "general") renderGeneral(c);
   else if (settingsSection === "regex") renderRegexTool(c);
   else renderRules(c, settingsSection === "rules-pc" ? "pc" : "ph");
 }

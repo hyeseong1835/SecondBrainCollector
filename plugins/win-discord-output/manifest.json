@@ -1,7 +1,7 @@
 {
   "type": "collector",
   "id": "win-discord-output",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "디스코드 출력 녹음 (Windows)",
   "min_host_version": 1,
   "platforms": [
@@ -35,6 +35,17 @@
       "identity": [
         "file"
       ]
+    }
+  ],
+  "description": "디스코드가 소리를 내보내는 출력 장치(가상 케이블 등)를 상시 녹음한다. 소리가 있는 구간만 파일로 남긴다.",
+  "settings": [
+    {
+      "key": "output_device",
+      "type": "string",
+      "default": "",
+      "label": "녹음할 출력 장치",
+      "description": "디스코드의 출력 장치로 고른 장치(예: CABLE Input). 비우면 녹음하지 않는다. 장치 ID로 저장한다.",
+      "x-picker": "audio-output"
     }
   ]
 }

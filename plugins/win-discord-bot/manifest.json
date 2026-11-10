@@ -1,7 +1,7 @@
 {
   "type": "collector",
   "id": "win-discord-bot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "디스코드 봇 녹음 (Windows)",
   "min_host_version": 1,
   "platforms": [
@@ -38,6 +38,30 @@
       "identity": [
         "file"
       ]
+    }
+  ],
+  "description": "켰을 때만 봇이 내가 들어간 음성 채널을 따라 들어가 말하는 사람별로 녹음한다.",
+  "settings": [
+    {
+      "key": "enabled",
+      "type": "boolean",
+      "default": false,
+      "label": "봇 녹음 켜기",
+      "description": "켜 두면 아래 사용자가 음성 채널에 들어갈 때 봇이 따라 들어간다. 트레이 메뉴 '디스코드 봇 녹음'과 같다."
+    },
+    {
+      "key": "target_user_id",
+      "type": "string",
+      "default": "",
+      "label": "따라갈 디스코드 사용자 ID",
+      "description": "내 디스코드 사용자 ID(17~20자리 숫자). 디스코드 개발자 모드에서 프로필 › ID 복사."
+    }
+  ],
+  "x-secrets": [
+    {
+      "key": "bot_token",
+      "label": "봇 토큰",
+      "description": "HearingAid와 같은 봇의 토큰. 이 PC에만 DPAPI로 암호화해 저장하고 DB·서버로 보내지 않는다."
     }
   ]
 }
