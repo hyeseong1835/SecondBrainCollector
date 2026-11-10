@@ -140,6 +140,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file"); ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--redo", action="store_true")
     ap.add_argument("--min-summary-chars", type=int, default=60)
+    ap.add_argument("--source", choices=list(SOURCES), help="이 원천 폴더만(예: phone)")
     a = ap.parse_args()
     for p in (WHISPER, ASR_MODEL, VAD_MODEL, FFMPEG):
         if not p or not Path(p).exists(): sys.exit(f"없음: {p}")
@@ -152,6 +153,7 @@ def main():
         jobs.append((src, SOURCES[src], f.relative_to(ROOT / src).as_posix() if f.is_relative_to(ROOT / src) else f.name, f))
     else:
         for folder, device in SOURCES.items():
+            if a.source and folder != a.source: continue
             base = ROOT / folder
             if not base.exists(): continue
             done = set() if a.redo else set(call("GET", "/api/recordings/analyzed?device=" + urllib.parse.quote(device)) or [])
