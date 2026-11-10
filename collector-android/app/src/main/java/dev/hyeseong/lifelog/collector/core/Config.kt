@@ -27,8 +27,13 @@ class Config(context: Context) {
     fun markDone(key: String) = prefs.edit().putBoolean("done_$key", true).apply()
     var password: String get() = prefs.getString("password", "") ?: ""; set(v) = prefs.edit().putString("password", v).apply()
 
+    /** SecondBrainApi 주소(세컨뇌 DB 이전 7단계). 있으면 DB에 직접 붙지 않고 API를 거친다. 키는 종류 collector, 이름 = 기기 id. */
+    var apiUrl: String get() = prefs.getString("api_url", "") ?: ""; set(v) = prefs.edit().putString("api_url", v).apply()
+    var apiKey: String get() = prefs.getString("api_key", "") ?: ""; set(v) = prefs.edit().putString("api_key", v).apply()
+    val usesApi get() = apiUrl.isNotBlank()
+
     val user get() = "lifelog_device_$device" + if (tenant.isEmpty()) "" else ".$tenant"
-    val isComplete get() = device.isNotEmpty() && host.isNotEmpty() && password.isNotEmpty()
+    val isComplete get() = device.isNotEmpty() && (if (usesApi) apiKey.isNotEmpty() else host.isNotEmpty() && password.isNotEmpty())
 
     fun jdbcUrl() = "jdbc:postgresql://$host:$port/$database?sslmode=${if (ssl) "require" else "prefer"}&ApplicationName=lifelog-collector-android&connectTimeout=15&socketTimeout=60"
 

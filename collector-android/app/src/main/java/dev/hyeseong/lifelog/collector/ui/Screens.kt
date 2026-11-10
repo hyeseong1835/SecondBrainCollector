@@ -74,7 +74,7 @@ fun StatusScreen(model: AppModel) {
                 OutlinedButton(onClick = { model.stopService(); scope.launch { delay(2500); model.refresh() } }, enabled = model.running) { Text("중지") }
                 OutlinedButton(onClick = { scope.launch { model.refresh() } }) { Text("새로고침") }
             }
-            if (!model.cfg.isComplete) Text("연결 탭에서 DB 접속을 먼저 설정하세요.", color = MaterialTheme.colorScheme.error)
+            if (!model.cfg.isComplete) Text("연결 탭에서 API(또는 DB) 접속을 먼저 설정하세요.", color = MaterialTheme.colorScheme.error)
             Text("켜 두면 부팅 뒤에도 자동으로 시작합니다. 중지하면 자동 시작도 꺼집니다.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Section("플러그인") {
@@ -295,10 +295,24 @@ fun ConnectionScreen(model: AppModel) {
     var tenant by remember { mutableStateOf(extra("tenant", cfg.tenant)) }
     var ssl by remember { mutableStateOf(cfg.ssl) }
     var password by remember { mutableStateOf(extra("password", "")) }
+    var apiUrl by remember { mutableStateOf(extra("api_url", cfg.apiUrl)) }
+    var apiKey by remember { mutableStateOf(extra("api_key", "")) }
     Screen {
-        Text("DB 연결 (기기 롤)", style = MaterialTheme.typography.titleLarge)
-        Section("접속") {
-            OutlinedTextField(device, { device = it }, label = { Text("기기 id") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Text("연결", style = MaterialTheme.typography.titleLarge)
+        Section("세컨뇌 API (권장)") {
+            OutlinedTextField(device, { device = it }, label = { Text("기기 id (키 이름과 같게)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(apiUrl, { apiUrl = it }, label = { Text("API 주소 (비우면 아래 DB 직접 연결)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(apiKey, { apiKey = it }, label = { Text(if (cfg.apiKey.isEmpty()) "API 키 (종류 collector)" else "API 키 (저장됨 · 바꿀 때만 입력)") }, singleLine = true,
+                visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+            Button(onClick = {
+                cfg.device = device.trim(); cfg.apiUrl = apiUrl.trim()
+                if (apiKey.isNotEmpty()) cfg.apiKey = apiKey.trim()
+                apiKey = ""
+                scope.launch { model.run("연결 확인") { model.testConnection() } }
+            }, enabled = !model.busy) { Text("저장하고 연결 확인") }
+            Text(if (cfg.usesApi) "지금: API 모드" else "지금: DB 직접 연결", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Section("DB 직접 연결 (옛 방식)") {
             OutlinedTextField(host, { host = it }, label = { Text("호스트") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(port, { port = it }, label = { Text("포트") }, singleLine = true, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
@@ -309,7 +323,7 @@ fun ConnectionScreen(model: AppModel) {
             OutlinedTextField(password, { password = it }, label = { Text(if (cfg.password.isEmpty()) "기기 비밀번호" else "기기 비밀번호 (저장됨 · 바꿀 때만 입력)") }, singleLine = true,
                 visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
             Button(onClick = {
-                cfg.device = device.trim(); cfg.host = host.trim(); cfg.port = port.trim().toIntOrNull() ?: 5432; cfg.database = database.trim(); cfg.tenant = tenant.trim(); cfg.ssl = ssl
+                cfg.device = device.trim(); cfg.apiUrl = ""; apiUrl = ""; cfg.host = host.trim(); cfg.port = port.trim().toIntOrNull() ?: 5432; cfg.database = database.trim(); cfg.tenant = tenant.trim(); cfg.ssl = ssl
                 if (password.isNotEmpty()) cfg.password = password
                 password = ""
                 scope.launch { model.run("연결 확인") { model.testConnection() } }
