@@ -28,7 +28,14 @@ internal sealed class DbApi : IDisposable
     {
         using var req = new HttpRequestMessage(method, "api/lifelog/" + path);
         if (json is not null) req.Content = new StringContent(json, Encoding.UTF8, "application/json");
-        using var res = await _http.SendAsync(req, ct);
+        HttpResponseMessage resMsg;
+        try { resMsg = await _http.SendAsync(req, ct); }
+        catch (TaskCanceledException e) when (!ct.IsCancellationRequested)
+        {
+            // HttpClient 시간 초과도 TaskCanceledException이다. 업로더는 OperationCanceledException을 "종료"로 보므로 재시도할 오류로 바꾼다
+            throw new HttpRequestException("API 응답 시간 초과", e);
+        }
+        using var res = resMsg;
         if (notFoundIsNull && res.StatusCode == HttpStatusCode.NotFound) return null;
         var text = await res.Content.ReadAsStringAsync(ct);
         if (!res.IsSuccessStatusCode)
