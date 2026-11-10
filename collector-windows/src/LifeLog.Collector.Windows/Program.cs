@@ -17,6 +17,8 @@ static class Cli
           setup-reset  같은 인자. 이미 등록된 기기의 비밀번호를 다시 받아 설정한다
                   관리자 접속 문자열은 환경 변수 LIFELOG_ADMIN_DSN 또는 표준 입력으로 받는다(저장하지 않음).
                   기기 롤을 만들고 비밀번호를 DPAPI로 보호해 config.json에 둔다.
+          use-api --url URL   DB 직접 연결 대신 SecondBrainApi를 거친다(세컨뇌 DB 이전 7단계). 키(종류 collector, 이름 = 기기 id)는
+                  환경 변수 LIFELOG_API_KEY 또는 표준 입력으로 받아 DPAPI로 저장한다. --url ""면 다시 DB 직접 연결로
           install <플러그인 폴더 또는 zip> [--grant-all]
                   plugins/<id>로 복사하고 등록한다. --grant-all은 매니페스트의 권한을 전부 허용하고 켠다(개발용).
           enable <id> | disable <id>
@@ -43,6 +45,7 @@ static class Cli
             {
                 case "setup": return await SetupAsync(args[1..], reset: false);
                 case "setup-reset": return await SetupAsync(args[1..], reset: true);
+                case "use-api": return await UseApiAsync(args[1..]);
                 case "install": return await InstallAsync(args[1..]);
                 case "enable": return await EnableAsync(args[1], true);
                 case "disable": return await EnableAsync(args[1], false);
@@ -103,12 +106,37 @@ static class Cli
         return 0;
     }
 
+    static async Task<int> UseApiAsync(string[] a)
+    {
+        var cfg = Config.Load() ?? new Config();
+        var url = Opt(a, "--url") ?? throw new ArgumentException("--url이 필요합니다");
+        if (url.Length == 0)
+        {
+            cfg.ApiUrl = ""; cfg.ApiKeyProtected = ""; cfg.Save();
+            Console.WriteLine("DB 직접 연결로 되돌렸습니다");
+            return 0;
+        }
+        var key = Environment.GetEnvironmentVariable("LIFELOG_API_KEY");
+        if (string.IsNullOrEmpty(key)) { Console.Error.Write("API 키(sbk_…): "); key = Console.ReadLine(); }
+        if (string.IsNullOrWhiteSpace(key)) throw new ArgumentException("API 키가 없습니다");
+        cfg.ApiUrl = url.TrimEnd('/');
+        cfg.SetApiKey(key.Trim());
+        await using (var db = Db.Open(cfg))
+        {
+            var v = await db.SchemaVersionAsync();
+            Console.WriteLine($"API 연결 확인: lifelog 스키마 {v}");
+        }
+        cfg.Save();
+        Console.WriteLine($"API 모드로 저장했습니다({cfg.ApiUrl}). 실행 중이면 stop 후 다시 run");
+        return 0;
+    }
+
     static async Task<int> InstallAsync(string[] a)
     {
         var src = a.Length > 0 ? a[0] : throw new ArgumentException("플러그인 폴더·zip·GitHub URL이 필요합니다");
         var grantAll = a.Contains("--grant-all");
         var cfg = Config.Load() ?? throw new InvalidOperationException("setup을 먼저 하세요");
-        await using var db = new Db(cfg.ConnectionString());
+        await using var db = Db.Open(cfg);
         var r = await PluginInstaller.InstallAsync(db, cfg.Device, Config.PluginsDir, src, grantAll, "collector");
         Console.WriteLine($"등록: {r.Registered}");
         Console.WriteLine(r.Install is { } inst ? $"켬(권한 전부 허용): {inst}" : $"설치됨. 권한을 허용하고 켜려면: enable {r.Manifest.Id}");
@@ -120,7 +148,7 @@ static class Cli
     {
         var cfg = Config.Load() ?? throw new InvalidOperationException("setup을 먼저 하세요");
         var m = Manifest.Load(Path.Combine(Config.PluginsDir, id, "manifest.json"));
-        await using var db = new Db(cfg.ConnectionString());
+        await using var db = Db.Open(cfg);
         var inst = await db.GetInstallAsync(id, cfg.Device) ?? throw new InvalidOperationException("설치되지 않은 플러그인입니다");
         var granted = on ? JsonSerializer.Serialize(m.Capabilities.Select(c => c.Id)) : JsonSerializer.Serialize(inst.Granted);
         var row = await db.SetInstallAsync(id, cfg.Device, inst.InstalledVersion, on, inst.Settings.GetRawText(), granted);
@@ -201,11 +229,11 @@ static class Cli
     {
         var cfg = Config.Load();
         if (cfg is null) { Console.WriteLine("설정 없음. setup을 먼저 하세요"); return 1; }
-        Console.WriteLine($"기기 {cfg.Device}  DB {cfg.Host}:{cfg.Port}/{cfg.Database}  사용자 {cfg.User}");
+        Console.WriteLine(cfg.UsesApi ? $"기기 {cfg.Device}  API {cfg.ApiUrl}" : $"기기 {cfg.Device}  DB {cfg.Host}:{cfg.Port}/{cfg.Database}  사용자 {cfg.User}");
         using (var q = new Queue(Config.QueuePath)) Console.WriteLine($"큐 대기 {q.Count()}건");
         if (Directory.Exists(Config.PluginsDir))
         {
-            await using var db = new Db(cfg.ConnectionString());
+            await using var db = Db.Open(cfg);
             foreach (var dir in Directory.GetDirectories(Config.PluginsDir))
             {
                 var m = Manifest.Load(Path.Combine(dir, "manifest.json"));

@@ -24,7 +24,7 @@ public sealed class Host : IAsyncDisposable
     public Host(Config config)
     {
         Config = config;
-        Db = new Db(config.ConnectionString());
+        Db = Db.Open(config);
         Queue = new Queue(Config.QueuePath);
         Spans = new SpanManager(Queue, config.Device);
         Dispatcher = new Dispatcher(Log);

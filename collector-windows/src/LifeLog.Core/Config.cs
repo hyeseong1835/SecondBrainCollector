@@ -31,6 +31,21 @@ public sealed class Config
 
     public string User => "lifelog_device_" + Device + (string.IsNullOrEmpty(Tenant) ? "" : "." + Tenant);
 
+    /// <summary>
+    /// SecondBrainApi 주소(세컨뇌 DB 이전 7단계). 비어 있지 않으면 DB에 직접 붙지 않고 API를 거친다(<see cref="Db.Open"/>).
+    /// 키는 종류 collector, 이름 = 기기 id. DPAPI로 보호해 둔다.
+    /// </summary>
+    [JsonPropertyName("api_url")] public string ApiUrl { get; set; } = "";
+    [JsonPropertyName("api_key_protected")] public string ApiKeyProtected { get; set; } = "";
+
+    [JsonIgnore] public bool UsesApi => !string.IsNullOrWhiteSpace(ApiUrl);
+
+    public void SetApiKey(string plain)
+        => ApiKeyProtected = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(plain), null, DataProtectionScope.CurrentUser));
+
+    public string GetApiKey()
+        => Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(ApiKeyProtected), null, DataProtectionScope.CurrentUser));
+
     public static Config? Load()
     {
         if (File.Exists(FilePath)) return JsonSerializer.Deserialize<Config>(File.ReadAllText(FilePath));
