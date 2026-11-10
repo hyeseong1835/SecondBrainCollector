@@ -63,6 +63,7 @@ class CollectorService : Service() {
         var type = 0
         if (granted(android.Manifest.permission.ACCESS_FINE_LOCATION) || granted(android.Manifest.permission.ACCESS_COARSE_LOCATION)) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
         if (granted(android.Manifest.permission.ACTIVITY_RECOGNITION)) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH
+        if (granted(android.Manifest.permission.RECORD_AUDIO)) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE   // 녹음(audio 소스)
         if (type == 0) type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         try { startForeground(1, notification("시작 중"), type) }
         catch (e: Exception) {
@@ -121,7 +122,7 @@ class CollectorService : Service() {
                 if (!inst.enabled) { log(this, "[${m.id}] 꺼져 있음"); continue }
                 // 필수 소스가 이 호스트에 없으면 못 돌린다. 선택 소스(예: read:shealth)는 has()로 플러그인이 확인한다
                 val missing = m.capabilities.filter { it.second }.map { it.first }.filter { it.startsWith("event:") || it.startsWith("read:") }
-                    .map { it.substringAfter(':') }.filter { it !in setOf("screen", "location", "media", "notification", "network", "bluetooth", "usage", "health", "shealth") }
+                    .map { it.substringAfter(':') }.filter { it !in setOf("screen", "location", "media", "notification", "network", "bluetooth", "audio", "usage", "health", "shealth") }
                 if (missing.isNotEmpty()) { log(this, "[${m.id}] 이 호스트에 없는 필수 소스: $missing"); continue }
                 val p = JsPlugin(m, pdir, HostImpl(m))
                 p.load()
@@ -139,7 +140,7 @@ class CollectorService : Service() {
 
         for (p in plugins) try { p.start(); log(this, "[${p.manifest.id}] 시작") } catch (e: Exception) { log(this, "[${p.manifest.id}] start 실패: $e") }
         for (src in plugins.flatMap { it.subscribed }.distinct()) {
-            val s: EventSource = when (src) { "screen" -> ScreenSource(this); "location" -> LocationSource(this); "media" -> MediaSource(this); "notification" -> NotificationSource(this); "network" -> NetworkSource(this); "bluetooth" -> BluetoothSource(this); else -> continue }
+            val s: EventSource = when (src) { "screen" -> ScreenSource(this); "location" -> LocationSource(this); "media" -> MediaSource(this); "notification" -> NotificationSource(this); "network" -> NetworkSource(this); "bluetooth" -> BluetoothSource(this); "audio" -> AudioSource(this); else -> continue }
             try {
                 s.start { ev -> handler.post { for (p in plugins) p.deliver(src, ev.toString()) } }
                 eventSources[src] = s

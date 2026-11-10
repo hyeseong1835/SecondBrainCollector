@@ -1,0 +1,40 @@
+{
+  "type": "collector",
+  "id": "phone-audio",
+  "version": "1.0.0",
+  "name": "녹음",
+  "min_host_version": 1,
+  "platforms": [
+    "android"
+  ],
+  "runtimes": {
+    "js": "main.js"
+  },
+  "capabilities": [
+    {
+      "id": "event:audio",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "recording",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "file": "text",
+        "bytes": "bigint",
+        "sha256": "text",
+        "codec": "text",
+        "duration_ms": "bigint",
+        "mean_db": "double precision",
+        "peak_db": "double precision",
+        "floor_db": "double precision"
+      },
+      "label": "file",
+      "identity": [
+        "file"
+      ]
+    }
+  ]
+}
