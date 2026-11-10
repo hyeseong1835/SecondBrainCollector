@@ -132,9 +132,9 @@ public sealed class Host : IAsyncDisposable
         while (Queue.Count() > 0 && _uploader.LastError is null) await Task.Delay(500);
     }
 
-    public static readonly HashSet<string> KnownSources = ["window", "idle", "power", "media", "input", "battery"];
+    public static readonly HashSet<string> KnownSources = ["window", "idle", "power", "media", "input", "battery", "discord_output", "discord_bot"];
 
-    private static ISource? CreateSource(string id) => id switch
+    private ISource? CreateSource(string id) => id switch
     {
         "window" => new WindowSource(),
         "idle" => new IdleSource(),
@@ -142,6 +142,8 @@ public sealed class Host : IAsyncDisposable
         "media" => new MediaSource(),
         "input" => new InputSource(),
         "battery" => new BatterySource(),
+        "discord_output" => new DiscordOutputSource(Log),
+        "discord_bot" => new DiscordBotSource(Log),
         _ => null,
     };
 

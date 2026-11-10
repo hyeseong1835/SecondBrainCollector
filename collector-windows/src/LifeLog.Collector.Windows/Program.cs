@@ -28,6 +28,12 @@ static class Cli
           autostart on|off   로그온 시 자동 실행(HKCU Run 키)
           status  설정·큐·플러그인 상태
 
+          디스코드 녹음(플러그인 win-discord-output·win-discord-bot):
+          discord-devices          렌더(출력) 장치 목록과 지금 고른 장치
+          discord-device <이름 일부|ID>   상시 녹음할 장치를 정한다(루프백). 실행 중이면 10초 안에 다시 붙는다
+          discord-token            봇 토큰과 따라갈 사용자 ID를 직접 입력해 DPAPI로 저장(화면에 표시하지 않음)
+          discord-bot on|off       봇 녹음 켜기/끄기(트레이 메뉴와 같다)
+
         로그: %LOCALAPPDATA%\SecondBrain\collector\collector.log (옛 %LOCALAPPDATA%\LifeLog\collector는 처음 실행 때 옮긴다)
         """;
 
@@ -57,6 +63,11 @@ static class Cli
                 case "autostart": return Autostart(args.Length > 1 && args[1] == "on");
                 case "set-tenant": return SetTenant(args.Length > 1 ? args[1] : "");
                 case "status": return await StatusAsync();
+                case "discord-devices": return DiscordCli.Devices();
+                case "discord-device": return DiscordCli.SetDevice(string.Join(' ', args[1..]));
+                case "discord-token": return DiscordCli.Token();
+                case "discord-simulate": return DiscordCli.Simulate(args[1]);
+                case "discord-bot": return DiscordCli.Bot(args.Length > 1 ? args[1] : "");
                 default: Console.WriteLine(Usage); return 1;
             }
         }

@@ -1,0 +1,43 @@
+{
+  "type": "collector",
+  "id": "win-discord-bot",
+  "version": "1.0.0",
+  "name": "디스코드 봇 녹음 (Windows)",
+  "min_host_version": 1,
+  "platforms": [
+    "windows"
+  ],
+  "runtimes": {
+    "js": "main.js"
+  },
+  "capabilities": [
+    {
+      "id": "event:discord_bot",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "recording",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "file": "text",
+        "bytes": "bigint",
+        "sha256": "text",
+        "codec": "text",
+        "duration_ms": "bigint",
+        "mean_db": "double precision",
+        "peak_db": "double precision",
+        "user_id": "text",
+        "speaker": "text",
+        "guild_id": "text",
+        "channel_id": "text"
+      },
+      "label": "speaker",
+      "identity": [
+        "file"
+      ]
+    }
+  ]
+}

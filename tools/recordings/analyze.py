@@ -7,6 +7,7 @@
 녹음 위치: %USERPROFILE%/SecondBrainRecordings/<원천>/<날짜>/<이름>.m4a
   phone/           폰 녹음(pull-recordings.ps1이 가져옴). 기기 phone
   discord-output/  디스코드 출력 장치 녹음(데스크톱 수집기). 기기 laptop
+  discord-bot/     디스코드 봇 녹음(데스크톱 수집기, 사람별 파일 + 옆 .json에 화자). 기기 laptop. 세그먼트 speaker = 디스코드 표시 이름
 도구·모델: %LOCALAPPDATA%/SecondBrain/analysis (whisper.cpp Vulkan 빌드, ffmpeg, llama.cpp Vulkan, 모델들)
   전사 batisay-ko-turbo q8_0 + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
 API: %LOCALAPPDATA%/SecondBrain/api.json의 url·key(훅 키)
@@ -23,7 +24,7 @@ LLM_MODEL = A / "models" / "EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf"
 LLAMA = A / "llama" / "llama-server.exe"
 FFMPEG = next((A / "ffmpeg").rglob("ffmpeg.exe"), None)
 ROOT = Path(os.environ["USERPROFILE"]) / "SecondBrainRecordings"
-SOURCES = {"phone": "phone", "discord-output": "laptop"}   # 폴더 → 기기
+SOURCES = {"phone": "phone", "discord-output": "laptop", "discord-bot": "laptop"}   # 폴더 → 기기
 LLM_PORT = 8089
 # whisper가 말소리 없는 곳에서 지어내는 흔한 문장(유튜브 자막 학습 흔적)
 HALLUCINATIONS = re.compile(r"^(시청해\s*주셔서\s*감사합니다|구독과\s*좋아요|MBC\s*뉴스|자막\s*제공|[.\s,!?♪]*)$")
@@ -47,6 +48,43 @@ def started_from_name(path: Path) -> dt.datetime:
     if not m:
         return dt.datetime.fromtimestamp(path.stat().st_mtime).astimezone()
     return dt.datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").astimezone()
+
+
+# ---- 디스코드 봇 녹음(discord-bot) ----
+# 수집기 DiscordBotSource가 사람별 파일 옆에 같은 이름의 .json을 둔다:
+#   { user_id, speaker(표시 이름), username, guild_id, guild, channel_id, channel, start, end, duration_ms, ... }
+# 파일 하나 = 한 사람이므로 모든 세그먼트의 speaker를 그 사람의 표시 이름으로 채운다.
+
+def discord_bot_meta(f: Path):
+    """봇 녹음 옆 .json. 없거나 깨졌으면 None."""
+    side = f.with_suffix(".json")
+    try:
+        return json.load(open(side, encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def apply_discord_bot(f: Path, segs: list, start: dt.datetime):
+    """세그먼트 speaker에 디스코드 표시 이름을 넣고, 시작 시각을 .json의 것으로 바꾼다. (start, 요약 문맥)을 돌려준다."""
+    meta = discord_bot_meta(f)
+    if not meta:
+        return start, None
+    speaker = meta.get("speaker") or meta.get("username") or meta.get("user_id")
+    for s in segs:
+        s["speaker"] = speaker
+    if meta.get("start"):
+        try:
+            start = dt.datetime.fromisoformat(meta["start"])
+        except ValueError:
+            pass
+    where = " / ".join(x for x in (meta.get("guild"), meta.get("channel")) if x)
+    return start, f"디스코드 음성 채널({where})에서 {speaker}이(가) 한 말"
+
+
+def source_of(f: Path) -> str:
+    """--file로 받은 파일의 원천: .../SecondBrainRecordings/<원천>/<날짜>/<이름>.m4a"""
+    parent = f.parent.parent.name
+    return parent if parent in SOURCES else "phone"
 
 
 def to_wav(src: Path, dst: Path):
@@ -75,7 +113,7 @@ class Llm:
     def __init__(self):
         self.proc = None
 
-    def summarize(self, transcript: str) -> str:
+    def summarize(self, transcript: str, context: str | None = None) -> str:
         if self.proc is None:
             self.proc = subprocess.Popen([str(LLAMA), "-m", str(LLM_MODEL), "--port", str(LLM_PORT), "-ngl", "99", "-c", "8192", "--log-disable"],
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -87,7 +125,7 @@ class Llm:
         body = {"messages": [
             {"role": "system", "content": "너는 개인 기록 정리 도우미다. 사용자가 하루 동안 폰으로 녹음한 소리의 전사를 받는다. 전사는 음성 인식 결과라 틀린 글자가 있을 수 있다. "
                                           "무슨 상황이었는지(대화·수업·혼잣말·영상 소리 등)와 핵심 내용을 한국어로 3줄 이내 개조식으로 요약한다. 없는 내용을 지어내지 않는다."},
-            {"role": "user", "content": transcript[:12000]}], "temperature": 0.2, "max_tokens": 300}
+            {"role": "user", "content": (f"[{context}]\n" if context else "") + transcript[:12000]}], "temperature": 0.2, "max_tokens": 300}
         req = urllib.request.Request(f"http://127.0.0.1:{LLM_PORT}/v1/chat/completions", data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=300) as r:
@@ -110,7 +148,8 @@ def main():
     jobs = []   # (원천, 기기, 상대 경로, 절대 경로)
     if a.file:
         f = Path(a.file).resolve()
-        jobs.append(("phone", "phone", f.name, f))
+        src = source_of(f)
+        jobs.append((src, SOURCES[src], f.relative_to(ROOT / src).as_posix() if f.is_relative_to(ROOT / src) else f.name, f))
     else:
         for folder, device in SOURCES.items():
             base = ROOT / folder
@@ -131,10 +170,14 @@ def main():
                 segs = transcribe(wav, Path(tmp) / "a")
                 transcript = " ".join(s["text"] for s in segs)
                 speech = sum(s["endMs"] - s["startMs"] for s in segs)
+                start, context = started_from_name(f), None
+                if source == "discord-bot":
+                    start, context = apply_discord_bot(f, segs, start)
+                elif source == "discord-output":
+                    context = "디스코드 음성 통화에서 내 PC로 들린 소리(내 목소리는 없음)"
                 summary = None
                 if len(transcript) >= a.min_summary_chars and LLM_MODEL.exists():
-                    summary = llm.summarize(transcript)
-                start = started_from_name(f)
+                    summary = llm.summarize(transcript, context)
                 body = {"device": device, "file": rel, "source": source, "startedAt": start.isoformat(), "endedAt": (start + dt.timedelta(milliseconds=dur)).isoformat(),
                         "asrModel": ASR_MODEL.stem.removeprefix("ggml-"), "llmModel": LLM_MODEL.stem if summary else None, "language": "ko",
                         "speechMs": speech, "transcript": transcript, "summary": summary, "segments": segs}
@@ -142,7 +185,7 @@ def main():
                     call("PUT", "/api/recordings/analysis", body)
                 print(f"[{i}/{len(jobs)}] {rel}  {dur/1000:.0f}초 → 말 {speech/1000:.0f}초, {len(segs)}구간 ({time.time()-t0:.1f}초)")
                 if a.dry_run:
-                    for s in segs: print(f"    {s['startMs']/1000:7.1f}–{s['endMs']/1000:7.1f}  {s['text']}")
+                    for s in segs: print(f"    {s['startMs']/1000:7.1f}–{s['endMs']/1000:7.1f}  {(s['speaker'] + ': ') if s['speaker'] else ''}{s['text']}")
                     if summary: print("  요약:", summary)
     finally:
         llm.close()

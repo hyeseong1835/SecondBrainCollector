@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using LifeLog.Collector.Windows.Sources;
+using LifeLog.Collector.Windows.Sources.Recording;
 using LifeLog.Core;
 
 namespace LifeLog.Collector.Windows;
@@ -34,9 +36,22 @@ public sealed class Tray : IDisposable
         var status = new ToolStripMenuItem("SecondBrain Collector") { Enabled = false };
         menu.Items.Add(status);
         menu.Items.Add(new ToolStripSeparator());
+        // 디스코드 봇 녹음 켜고 끄기(discord.json의 bot_enabled). 켜져 있으면 내가 음성 채널에 들어갈 때 봇이 따라 들어가 사람별로 저장한다
+        var bot = new ToolStripMenuItem("디스코드 봇 녹음") { CheckOnClick = false };
+        bot.Click += (_, _) => DiscordSettings.Update(s => s.BotEnabled = !s.BotEnabled);
+        var botStatus = new ToolStripMenuItem("") { Enabled = false };
+        menu.Items.Add(bot);
+        menu.Items.Add(botStatus);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("로그 폴더 열기", null, (_, _) => Process.Start(new ProcessStartInfo("explorer.exe", Config.Dir) { UseShellExecute = true }));
+        menu.Items.Add("녹음 폴더 열기", null, (_, _) => { Directory.CreateDirectory(RecordingPaths.Root); Process.Start(new ProcessStartInfo("explorer.exe", RecordingPaths.Root) { UseShellExecute = true }); });
         menu.Items.Add("종료", null, (_, _) => _quit());
-        menu.Opening += (_, _) => status.Text = _status();
+        menu.Opening += (_, _) =>
+        {
+            status.Text = _status();
+            bot.Checked = DiscordSettings.Load().BotEnabled;
+            botStatus.Text = "  봇: " + DiscordBotSource.StatusText;
+        };
         _icon = new NotifyIcon { Icon = SystemIcons.Application, Text = "SecondBrain Collector", Visible = true, ContextMenuStrip = menu };
         Application.Run();
         _icon.Visible = false;

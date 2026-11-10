@@ -17,7 +17,9 @@ src/LifeLog.Collector.Windows/    exe (net10.0-windows)
   JsPlugin.cs   Jint 엔진 하나 = 플러그인 하나. ctx(on, every, span, event, state, settings, privacy, has, now, log)
   Dispatcher.cs 모든 JS는 이 스레드에서만
   Sources/      window(SetWinEventHook), idle(GetLastInputInfo), power(SystemEvents), media(GSMTC),
-                input(저수준 훅으로 분당 횟수만), battery(GetSystemPowerStatus)
+                input(저수준 훅으로 분당 횟수만), battery(GetSystemPowerStatus),
+                discord_output(WASAPI 루프백 상시 녹음), discord_bot(디스코드 봇 사람별 녹음, 켰을 때만)
+  Sources/Recording/  M4aWriter(ffmpeg로 16kHz 모노 AAC 32kbps .m4a), DiscordSettings(discord.json, 토큰 DPAPI)
 ```
 
 ## 쓰는 법
@@ -35,6 +37,15 @@ $EXE autostart on        # 로그온 시 `run --tray` (작업 스케줄러)
 - `setup`은 관리자 접속으로 `register_device`를 부르고 받은 비밀번호만 저장한다. 관리자 접속 문자열은 저장하지 않는다.
 - `install`은 폴더·zip·GitHub URL을 `plugins/<id>`로 복사하고 `register_plugin`을 부른다(`LifeLog.Core/PluginInstaller.cs`, 대시보드와 공용). URL이면 등록부 `plugins.source_url`에 적는다(0006). 실행 중인 수집기가 있으면 reload 신호를 보내 호스트만 새로 만든다(트레이·뮤텍스 유지). `--grant-all`이 없으면 꺼진 채 설치되고 `enable <id>`로 켠다(지금은 권한 전부 허용. 항목별 허용 UI는 대시보드 몫).
 - `run`은 DB 코어 스키마 버전이 앱보다 높으면 쓰기를 거부한다. `autostart`는 HKCU Run 키를 쓴다(관리자 권한 불필요).
+
+## 디스코드 녹음 (2026-11-11)
+- 상시: `discord-devices`로 렌더 장치를 보고 `discord-device "CABLE Input"`으로 정한다(ID로 저장). 플러그인 `win-discord-output`.
+  소리 있는 구간만 `%USERPROFILE%\SecondBrainRecordings\discord-output\날짜\*.m4a`(폰 녹음과 같은 구간 규칙). 열은 phone-audio와 같다.
+- 봇: 일반 터미널에서 `discord-token`(토큰·내 사용자 ID를 직접 입력, 화면에 안 보임, DPAPI) → 트레이 "디스코드 봇 녹음" 또는 `discord-bot on`.
+  내가 음성 채널에 들어가면 봇(HearingAid와 같은 봇)이 따라 들어가 사람별 파일 `discord-bot\날짜\시각-사용자ID-xxxx.m4a` + 옆 `.json`(표시 이름·서버·채널). 플러그인 `win-discord-bot`.
+- AAC 인코딩은 ffmpeg(`SECONDBRAIN_FFMPEG` → `%LOCALAPPDATA%\SecondBrainnalysisfmpeg` → PATH). Media Foundation AAC는 16kHz·32kbps를 못 쓴다.
+- `discord-simulate <wav>`: WAV를 상시 녹음 구간 규칙에 흘려 본다(시험용, `%TEMP%\secondbrain-simulate`에 씀).
+- 분석: `tools/recordings/analyze.py`가 `discord-output`·`discord-bot`(기기 laptop)을 읽는다. 봇 파일은 세그먼트 speaker = 디스코드 표시 이름.
 
 ## 원시 기능
 `ctx.file.list(dir, pattern)`, `ctx.file.read(path, { from, max })` → `{ text, next, size, eof }`, `ctx.file.stat(path)`. 매니페스트의 `file:read:<경로 접두어>`(`~`·`%VAR%` 가능) 아래만 읽는다. `plugins/claude-session`(`~/.claude/projects`의 세션 jsonl)과 `plugins/vscode`(`collector-vscode` 확장이 쓰는 events.jsonl)가 예다. 둘 다 이어 읽기이고 상태에 읽은 위치를 둔다.
