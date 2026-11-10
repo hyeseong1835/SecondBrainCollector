@@ -29,7 +29,29 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installBundledPlugins()
+        importProvision()
         setContent { MaterialTheme(colorScheme = darkColorScheme()) { App(this) } }
+    }
+
+    /**
+     * 노트북이 adb run-as로 넣어 둔 files/provision.json({device, url, key})을 설정으로 옮기고 지운다(세컨뇌 DB 이전 7단계, API 모드).
+     * 키를 인텐트 인자로 넘기지 않으려고 파일로 받는다. 디버그 빌드에서만 run-as가 되므로 다른 앱은 이 파일을 못 쓴다.
+     * 수집을 켜 둔 상태였으면 바로 다시 시작한다.
+     */
+    private fun importProvision() {
+        val f = File(filesDir, "provision.json")
+        if (!f.exists()) return
+        try {
+            val j = JSONObject(f.readText())
+            val cfg = Config(this)
+            j.optString("device").takeIf { it.isNotEmpty() }?.let { cfg.device = it }
+            cfg.apiUrl = j.getString("url").trimEnd('/')
+            cfg.apiKey = j.getString("key").trim()
+            CollectorService.log(this, "provision.json으로 API 모드 설정(${cfg.apiUrl})")
+            if (cfg.autostart && !CollectorService.running) startForegroundService(Intent(this, CollectorService::class.java))
+        } catch (e: Exception) {
+            CollectorService.log(this, "provision.json 읽기 실패: $e")
+        } finally { f.delete() }
     }
 
     /** assets의 저장소 plugins/를 filesDir/plugins로 푼다(첫 실행·갱신). phone-·health만. */
