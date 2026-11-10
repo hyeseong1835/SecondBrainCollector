@@ -6,13 +6,20 @@
   - <Dest>/phone/index.tsv에 한 줄씩(파일, 바이트, sha256, 가져온 시각)
 무선 디버깅(adb pair/connect)으로 붙어 있어도 같은 스크립트로 된다.
 #>
-param([string] $Dest = (Join-Path $env:USERPROFILE "SecondBrainRecordings"), [string] $Package = "dev.hyeseong.secondbrain.collector")
+param([string] $Dest = (Join-Path $env:USERPROFILE "SecondBrainRecordings"), [string] $Package = "dev.hyeseong.secondbrain.collector", [switch] $Backfill)
 $ErrorActionPreference = 'Continue'
 $adb = Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"
 $remoteRoot = "/sdcard/Android/data/$Package/files/recordings"
 $localRoot = Join-Path $Dest "phone"
 $index = Join-Path $localRoot "index.tsv"
 
+# 사본 위치를 SecondBrain API(sb.recording_files)에 적는다. 키는 훅 키(%LOCALAPPDATA%\SecondBrain\api.json)
+$apiCfg = Get-Content (Join-Path $env:LOCALAPPDATA "SecondBrain\api.json") -Raw | ConvertFrom-Json
+function PutCopy($rel, $path, $bytes, $sha) {
+    $body = @{ device = 'phone'; file = $rel; location = 'laptop'; path = $path; bytes = $bytes; sha256 = $sha } | ConvertTo-Json -Compress
+    try { Invoke-RestMethod "$($apiCfg.url.TrimEnd('/'))/api/recordings/files" -Method Put -Headers @{ Authorization = "Bearer $($apiCfg.key)" } -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body)) | Out-Null; $true }
+    catch { Write-Host "  위치 기록 실패: $rel $($_.ErrorDetails.Message)" -ForegroundColor Yellow; $false }
+}
 & $adb reconnect offline 2>$null | Out-Null
 if (-not ((& $adb devices) -match "`tdevice$")) { Write-Host "폰이 연결되지 않았다(USB 디버깅 허용 확인)" -ForegroundColor Red; exit 1 }
 New-Item -ItemType Directory -Force $localRoot | Out-Null
@@ -26,7 +33,7 @@ Write-Host "폰 녹음 파일 $($files.Count)개"
 $pulled = 0; $skipped = 0; $bad = 0
 foreach ($f in $files) {
     $local = Join-Path $localRoot ($f.Rel -replace '/', '\')
-    if ((Test-Path $local) -and (Get-Item $local).Length -eq $f.Bytes) { $skipped++; continue }
+    if ((Test-Path $local) -and (Get-Item $local).Length -eq $f.Bytes) { $skipped++; continue }   # 위치는 가져올 때 이미 적었다
     New-Item -ItemType Directory -Force (Split-Path $local) | Out-Null
     $tmp = "$local.pulling"
     & $adb pull "$remoteRoot/$($f.Rel)" $tmp 2>&1 | Out-Null
@@ -36,7 +43,12 @@ foreach ($f in $files) {
     if ($localHash -ne $remoteHash) { Write-Host "  sha256 다름(폰 $remoteHash, 노트북 $localHash): $($f.Rel)" -ForegroundColor Yellow; Remove-Item $tmp -Force; $bad++; continue }
     Move-Item $tmp $local -Force
     "$($f.Rel)`t$($f.Bytes)`t$localHash`t$((Get-Date).ToString('s'))" | Out-File -Append -Encoding utf8 $index
+    PutCopy $f.Rel $local $f.Bytes $localHash | Out-Null
     $pulled++
+}
+if ($Backfill) {   # 이미 가져온 파일의 위치를 index.tsv에서 다시 적는다
+    $n = 0; Import-Csv $index -Delimiter "`t" | ForEach-Object { if (PutCopy $_.file (Join-Path $localRoot ($_.file -replace '/', '\')) ([long]$_.bytes) $_.sha256) { $n++ } }
+    Write-Host "위치 다시 적음 $n"
 }
 Write-Host "가져옴 $pulled · 이미 있음 $skipped · 실패 $bad  → $localRoot"
 if ($bad) { exit 1 }
