@@ -11,7 +11,7 @@ import java.util.UUID
 
 /**
  * DB 접근(JDBC). 기기 롤로 붙는다. 연결은 하나를 유지하고 끊기면 다시 연다. 호출은 업로더·디스패처 스레드에서.
- * 설정에 API 주소가 있으면(세컨뇌 DB 이전 7단계) DB에 붙지 않고 [DbApi]로 SecondBrainApi를 거친다.
+ * 설정에 API 주소가 있으면(SecondBrain DB 이전 7단계) DB에 붙지 않고 [DbApi]로 SecondBrainApi를 거친다.
  */
 class Db(private val cfg: Config) : AutoCloseable {
     companion object {

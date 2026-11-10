@@ -16,9 +16,9 @@ let range = null;
 let platform = "windows";   // 호스트가 알려 준다(windows | android)
 let mobile = false;         // 한 줄 배치
 let rulesShared = false;
-// 세컨뇌 데스크톱 안(?embed=1): 뷰 목록은 데스크톱 사이드바가 보여 주므로 탭은 편집할 때만 보인다. ?view=id로 시작 뷰
+// SecondBrain 데스크톱 안(?embed=1): 뷰 목록은 데스크톱 사이드바가 보여 주므로 탭은 편집할 때만 보인다. ?view=id로 시작 뷰
 const embed = params.get("embed") === "1";
-// 세컨뇌 위젯(SecondBrainDesktop/widgets)이 있으면 처음 한 번 넣는 뷰. 할 일 화면이 대시보드의 페이지가 된다
+// SecondBrain 위젯(SecondBrainDesktop/widgets)이 있으면 처음 한 번 넣는 뷰. 할 일 화면이 대시보드의 페이지가 된다
 const SB_VIEWS = [
   { id: "sb-todo", name: "할 일", widgets: [
     { id: "s1", type: "sb-doable", x: 0, y: 0, w: 10, h: 9, settings: {} },

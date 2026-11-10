@@ -8,12 +8,12 @@ import java.net.URL
 import java.net.URLEncoder
 
 /**
- * [Db]의 API 모드 구현(세컨뇌 DB 이전 7단계). 같은 일을 SecondBrainApi `/api/lifelog/...`로 한다. collector-windows DbApi.cs와 같다.
+ * [Db]의 API 모드 구현(SecondBrain DB 이전 7단계). 같은 일을 SecondBrainApi `/api/collector/...`로 한다. collector-windows DbApi.cs와 같다.
  * 기기는 서버가 API 키(종류 collector, 이름 = 기기 id)에서 정하므로 여기서 보내는 device는 쓰이지 않는다.
  * 4xx는 IllegalStateException("API 거절"), 5xx·연결 실패는 IOException. 업로더는 둘 다 큐에 남기고 다시 보낸다.
  */
 internal class DbApi(baseUrl: String, private val key: String) {
-    private val base = baseUrl.trimEnd('/') + "/api/lifelog/"
+    private val base = baseUrl.trimEnd('/') + "/api/collector/"
 
     private fun e(s: String) = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 

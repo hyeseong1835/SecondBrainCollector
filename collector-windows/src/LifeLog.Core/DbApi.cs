@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace LifeLog.Core;
 
 /// <summary>
-/// <see cref="Db"/>의 API 모드 구현(세컨뇌 DB 이전 7단계). 같은 일을 SecondBrainApi /api/lifelog/*로 한다.
+/// <see cref="Db"/>의 API 모드 구현(SecondBrain DB 이전 7단계). 같은 일을 SecondBrainApi /api/collector/*로 한다.
 /// 기기는 서버가 API 키(종류 collector, 이름 = 기기 id)에서 정하므로 여기서 보내는 device는 쓰이지 않는다.
 /// 서버에 닿지 않으면 HttpRequestException·TaskCanceledException이 나고, 업로더는 기존과 같이 큐에 남겨 다시 보낸다.
 /// </summary>
@@ -26,7 +26,7 @@ internal sealed class DbApi : IDisposable
 
     async Task<JsonElement?> Send(HttpMethod method, string path, string? json, CancellationToken ct, bool notFoundIsNull = false)
     {
-        using var req = new HttpRequestMessage(method, "api/lifelog/" + path);
+        using var req = new HttpRequestMessage(method, "api/collector/" + path);
         if (json is not null) req.Content = new StringContent(json, Encoding.UTF8, "application/json");
         HttpResponseMessage resMsg;
         try { resMsg = await _http.SendAsync(req, ct); }

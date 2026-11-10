@@ -63,7 +63,7 @@ fun StatusScreen(model: AppModel) {
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { while (true) { model.refresh(); delay(5000) } }   // 화면이 떠 있는 동안 5초마다
     Screen {
-        Text("세컨뇌 수집기", style = MaterialTheme.typography.titleLarge)
+        Text("SecondBrain Collector", style = MaterialTheme.typography.titleLarge)
         Section("수집") {
             KeyValue("상태", if (model.running) "실행 중 · ${model.status}" else "꺼짐")
             KeyValue("큐 대기", if (model.queue < 0) "-" else "${model.queue}건")
@@ -299,7 +299,7 @@ fun ConnectionScreen(model: AppModel) {
     var apiKey by remember { mutableStateOf(extra("api_key", "")) }
     Screen {
         Text("연결", style = MaterialTheme.typography.titleLarge)
-        Section("세컨뇌 API (권장)") {
+        Section("SecondBrain API (권장)") {
             OutlinedTextField(device, { device = it }, label = { Text("기기 id (키 이름과 같게)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(apiUrl, { apiUrl = it }, label = { Text("API 주소 (비우면 아래 DB 직접 연결)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(apiKey, { apiKey = it }, label = { Text(if (cfg.apiKey.isEmpty()) "API 키 (종류 collector)" else "API 키 (저장됨 · 바꿀 때만 입력)") }, singleLine = true,

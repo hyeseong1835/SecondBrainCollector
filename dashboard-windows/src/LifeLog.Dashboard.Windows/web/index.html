@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>LifeLog</title>
+<title>SecondBrain Dashboard</title>
 <style>
   :root { --bg:#111; --fg:#ddd; --mute:#888; --line:#2a2a2a; --accent:#6cf; --card:#181818; --btn:#222; --btn-border:#333; --btn-hover:#2c2c2c; --on:#2a3f55; --input:#1a1a1a; --tip-bg:#000; --tip-fg:#fff; --block-fg:#000; color-scheme: dark; }
   :root[data-theme="light"] { --bg:#f4f4f6; --fg:#1c1c1e; --mute:#6b6b70; --line:#dcdce0; --accent:#1a73e8; --card:#ffffff; --btn:#ffffff; --btn-border:#c9c9ce; --btn-hover:#ececf0; --on:#d6e6fb; --input:#ffffff; --tip-bg:#222; --tip-fg:#fff; --block-fg:#000; color-scheme: light; }
@@ -110,7 +110,7 @@
   dialog .row { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
   .plat { display:inline-block; padding:0 5px; margin:1px 2px 1px 0; border-radius:8px; font-size:11px; border:1px solid var(--btn-border); color:var(--mute); }
   .req { font-size:11px; }
-  /* 세컨뇌 데스크톱 안: 제목과 뷰 탭은 사이드바가 맡는다(편집 중에는 탭을 보여 뷰를 더하고 이름을 바꾼다) */
+  /* SecondBrain 데스크톱 안: 제목과 뷰 탭은 사이드바가 맡는다(편집 중에는 탭을 보여 뷰를 더하고 이름을 바꾼다) */
   body.embed header h1 { display:none; }
   body.embed:not(.editing) #tabs { display:none; }
   /* 휴대폰(한 줄 배치): 위젯을 세로로 쌓고, 머리줄·설정 사이드바를 좁은 화면에 맞춘다 */
@@ -138,7 +138,7 @@
 </head>
 <body>
 <header>
-  <h1>LifeLog</h1>
+  <h1>SecondBrain</h1>
   <button id="prev">◀</button>
   <div class="date" id="date"></div>
   <button id="next">▶</button>

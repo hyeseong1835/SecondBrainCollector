@@ -34,7 +34,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * 노트북이 adb run-as로 넣어 둔 files/provision.json({device, url, key})을 설정으로 옮기고 지운다(세컨뇌 DB 이전 7단계, API 모드).
+     * 노트북이 adb run-as로 넣어 둔 files/provision.json({device, url, key})을 설정으로 옮기고 지운다(SecondBrain DB 이전 7단계, API 모드).
      * 키를 인텐트 인자로 넘기지 않으려고 파일로 받는다. 디버그 빌드에서만 run-as가 되므로 다른 앱은 이 파일을 못 쓴다.
      * 수집을 켜 둔 상태였으면 바로 다시 시작한다.
      */

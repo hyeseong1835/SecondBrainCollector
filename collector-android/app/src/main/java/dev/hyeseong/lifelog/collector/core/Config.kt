@@ -27,7 +27,7 @@ class Config(context: Context) {
     fun markDone(key: String) = prefs.edit().putBoolean("done_$key", true).apply()
     var password: String get() = prefs.getString("password", "") ?: ""; set(v) = prefs.edit().putString("password", v).apply()
 
-    /** SecondBrainApi 주소(세컨뇌 DB 이전 7단계). 있으면 DB에 직접 붙지 않고 API를 거친다. 키는 종류 collector, 이름 = 기기 id. */
+    /** SecondBrainApi 주소(SecondBrain DB 이전 7단계). 있으면 DB에 직접 붙지 않고 API를 거친다. 키는 종류 collector, 이름 = 기기 id. */
     var apiUrl: String get() = prefs.getString("api_url", "") ?: ""; set(v) = prefs.edit().putString("api_url", v).apply()
     var apiKey: String get() = prefs.getString("api_key", "") ?: ""; set(v) = prefs.edit().putString("api_key", v).apply()
     val usesApi get() = apiUrl.isNotBlank()

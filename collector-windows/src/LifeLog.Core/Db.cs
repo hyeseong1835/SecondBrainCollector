@@ -18,7 +18,7 @@ public sealed class Db : IAsyncDisposable
     private int? _schema;
 
     private readonly NpgsqlDataSource _ds = null!;
-    /// <summary>API 모드(세컨뇌 DB 이전 7단계)면 DB 대신 SecondBrainApi를 부른다. null이면 기존처럼 DB에 직접 붙는다.</summary>
+    /// <summary>API 모드(SecondBrain DB 이전 7단계)면 DB 대신 SecondBrainApi를 부른다. null이면 기존처럼 DB에 직접 붙는다.</summary>
     private readonly DbApi? _api;
     public TimeSpan ClockOffset { get; private set; }   // DB now() - 로컬 now
 

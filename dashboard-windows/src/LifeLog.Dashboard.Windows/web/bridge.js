@@ -39,7 +39,7 @@
   window.addEventListener("unhandledrejection", e => { try { call("log", `${pluginId}: ${e.reason && e.reason.message || e.reason}`); } catch (_) {} });
   if (isTop && host) {
     host.listen(reply => {
-      // 세컨뇌 데스크톱 호스트: 사이드바에서 뷰를 고름 / 할 일을 바꿔서 다시 그림
+      // SecondBrain 데스크톱 호스트: 사이드바에서 뷰를 고름 / 할 일을 바꿔서 다시 그림
       if (reply && reply.lifelog === "selectView") { window.dispatchEvent(new CustomEvent("lifelog:selectView", { detail: reply.id })); return; }
       if (reply && reply.lifelog === "refresh") { window.dispatchEvent(new CustomEvent("lifelog:refresh")); return; }
       if (reply && reply.lifelog === "frameError") {   // 호스트가 알린 iframe 탐색 실패 → 최대 3번 다시 읽기
@@ -99,7 +99,7 @@
     reloadCollector: () => call("reloadCollector"),
     device: () => call("device"),
     /**
-     * 세컨뇌 데이터(SecondBrainDesktop 호스트만). 매니페스트 capabilities에 read:sb_tasks(할 일 읽기)·read:sb_log(트레이 로그 읽기)·
+     * SecondBrain 데이터(SecondBrainDesktop 호스트만). 매니페스트 capabilities에 read:sb_tasks(할 일 읽기)·read:sb_log(트레이 로그 읽기)·
      * read:sb_task_write(상태 바꾸기·편집 창 열기)를 선언한 위젯만 부를 수 있다.
      *   tasks({ view: "doable" | "all" | "closed" | "assignments", state }) · cleanup() · events(date) · focus()
      *   openTask(id) → 편집 창(바꿨으면 true) · move(id, "진행 중" | "대기" | "언젠가" | "보류" | "완료") · start(id) → 지금 하는 것으로

@@ -14,7 +14,7 @@ public sealed class Config
     /// <summary>앱 이름. 수집기는 "collector", 대시보드는 "dashboard". 시작 시 한 번 정한다.</summary>
     public static string AppName { get; set; } = "collector";
     private static string LocalAppData => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-    /// <summary>자료 폴더 %LOCALAPPDATA%\SecondBrain\{collector,dashboard}. 2026-11-11 세컨뇌로 이름을 바꾸기 전에는 %LOCALAPPDATA%\LifeLog였다.</summary>
+    /// <summary>자료 폴더 %LOCALAPPDATA%\SecondBrain\{collector,dashboard}. 2026-11-11 SecondBrain로 이름을 바꾸기 전에는 %LOCALAPPDATA%\LifeLog였다.</summary>
     public static string Root { get; } = Path.Combine(LocalAppData, "SecondBrain");
     public static string OldRoot { get; } = Path.Combine(LocalAppData, "LifeLog");
 
@@ -51,7 +51,7 @@ public sealed class Config
     public string User => "lifelog_device_" + Device + (string.IsNullOrEmpty(Tenant) ? "" : "." + Tenant);
 
     /// <summary>
-    /// SecondBrainApi 주소(세컨뇌 DB 이전 7단계). 비어 있지 않으면 DB에 직접 붙지 않고 API를 거친다(<see cref="Db.Open"/>).
+    /// SecondBrainApi 주소(SecondBrain DB 이전 7단계). 비어 있지 않으면 DB에 직접 붙지 않고 API를 거친다(<see cref="Db.Open"/>).
     /// 키는 종류 collector, 이름 = 기기 id. DPAPI로 보호해 둔다.
     /// </summary>
     [JsonPropertyName("api_url")] public string ApiUrl { get; set; } = "";

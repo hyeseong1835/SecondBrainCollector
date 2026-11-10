@@ -15,7 +15,7 @@ class PrivacyActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent { MaterialTheme(colorScheme = darkColorScheme()) {
-            Text("세컨뇌 수집기는 Health Connect 데이터를 읽어 사용자 본인의 세컨뇌 서버(데이터베이스)에만 저장합니다. 다른 곳으로 보내지 않습니다.", Modifier.padding(24.dp))
+            Text("SecondBrain Collector는 Health Connect 데이터를 읽어 사용자 본인의 SecondBrain 서버(데이터베이스)에만 저장합니다. 다른 곳으로 보내지 않습니다.", Modifier.padding(24.dp))
         } }
     }
 }

@@ -10,14 +10,14 @@ return await Cli.RunAsync(args);
 static class Cli
 {
     const string Usage = """
-        secondbrain-collector <명령>   (세컨뇌 수집기. 2026-11-11 lifelog-collector에서 이름 바꿈)
+        secondbrain-collector <명령>   (SecondBrain Collector. 2026-11-11 lifelog-collector에서 이름 바꿈)
 
           setup   --device ID --name 이름 --host H --port P --database DB [--no-ssl] [--tenant 프로젝트ref]
                   --tenant: Supabase 풀러는 사용자 이름이 롤.프로젝트ref 꼴이어야 한다. 맨 Postgres면 생략
           setup-reset  같은 인자. 이미 등록된 기기의 비밀번호를 다시 받아 설정한다
                   관리자 접속 문자열은 환경 변수 LIFELOG_ADMIN_DSN 또는 표준 입력으로 받는다(저장하지 않음).
                   기기 롤을 만들고 비밀번호를 DPAPI로 보호해 config.json에 둔다.
-          use-api --url URL   DB 직접 연결 대신 SecondBrainApi를 거친다(세컨뇌 DB 이전 7단계). 키(종류 collector, 이름 = 기기 id)는
+          use-api --url URL   DB 직접 연결 대신 SecondBrainApi를 거친다(SecondBrain DB 이전 7단계). 키(종류 collector, 이름 = 기기 id)는
                   환경 변수 LIFELOG_API_KEY 또는 표준 입력으로 받아 DPAPI로 저장한다. --url ""면 다시 DB 직접 연결로
           install <플러그인 폴더 또는 zip> [--grant-all]
                   plugins/<id>로 복사하고 등록한다. --grant-all은 매니페스트의 권한을 전부 허용하고 켠다(개발용).
