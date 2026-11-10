@@ -15,8 +15,8 @@ android {
         applicationId = "dev.hyeseong.secondbrain.collector"
         minSdk = 31   // LocationManager.requestLocationUpdates(LocationRequest) API 31. 대상은 S26U(Android 16)
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.4.1"
     }
 
     // 첫 플러그인은 저장소 plugins/를 assets로 묶어 첫 실행 때 filesDir/plugins로 푼다(GitHub URL 설치는 나중)
