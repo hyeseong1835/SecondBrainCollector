@@ -21,8 +21,8 @@
   discord-output/  디스코드 출력 장치 녹음(데스크톱 수집기). 기기 laptop
   discord-bot/     디스코드 봇 녹음(데스크톱 수집기, 사람별 파일 + 옆 .json에 화자). 기기 laptop. 세그먼트 speaker = 디스코드 표시 이름
   call/            삼성 통화 녹음(pull-call-recordings.ps1이 가져옴). 기기 phone, file은 "call/<날짜>/통화 <상대>_<YYMMDD>_<HHMMSS>.m4a"
-  laptop-mic/      노트북 마이크 상시 녹음(데스크톱 수집기). 기기 laptop, file은 "laptop-mic/<날짜>/<이름>.m4a", 구간 화자는 '나'
-화자 구분: speakers.py(sherpa-onnx). phone·call만. '나' 기준은 python speakers.py enroll로 먼저 만든다(없으면 화자1·화자2…만)
+  laptop-mic/      노트북 마이크 상시 녹음(데스크톱 수집기). 기기 laptop, file은 "laptop-mic/<날짜>/<이름>.m4a". 기숙사에선 룸메이트 목소리도 잡혀 화자 구분 대상
+화자 구분: speakers.py(sherpa-onnx). phone·call·laptop-mic. '나' 기준은 python speakers.py enroll로 먼저 만든다(없으면 화자1·화자2…만)
 도구·모델: %LOCALAPPDATA%/SecondBrain/analysis (whisper.cpp Vulkan 빌드, ffmpeg, llama.cpp Vulkan, 모델들)
   전사 batisay-ko-turbo q8_0 + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
 API: %LOCALAPPDATA%/SecondBrain/api.json의 url·key(훅 키). 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 있으면 그것(시험 인스턴스)
@@ -45,7 +45,6 @@ FFMPEG = next((A / "ffmpeg").rglob("ffmpeg.exe"), None)
 ROOT = Path(os.environ["USERPROFILE"]) / "SecondBrainRecordings"
 SOURCES = {"phone": "phone", "discord-output": "laptop", "discord-bot": "laptop", "call": "phone", "laptop-mic": "laptop"}   # 폴더 → 기기
 REL_PREFIX = {"call": "call/", "laptop-mic": "laptop-mic/"}   # 같은 기기의 다른 출처와 file 이름이 겹치지 않게
-ME_SOURCES = ("laptop-mic",)   # 구간 화자를 '나'로 채우는 원천(노트북 마이크는 주로 내 목소리)
 LLM_PORT = 8089
 # whisper가 말소리 없는 곳에서 지어내는 흔한 문장(유튜브 자막 학습 흔적)
 HALLUCINATIONS = re.compile(r"^(시청해\s*주셔서\s*감사합니다|구독과\s*좋아요|MBC\s*뉴스|자막\s*제공|[.\s,!?♪]*)$")
@@ -158,7 +157,7 @@ class Llm:
             self.proc.terminate()
 
 
-SPEAKER_SOURCES = ("phone", "call")   # 화자 구분(speakers.py)을 하는 원천. 전사를 단어 단위로 받는다
+SPEAKER_SOURCES = ("phone", "call", "laptop-mic")   # 화자 구분(speakers.py)을 하는 원천. 전사를 단어 단위로 받는다
 
 
 def assign_speakers(source: str, f: Path, wav: Path, words: list, state: dict):
@@ -315,7 +314,6 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
         for s in part:
             s["startMs"] += off; s["endMs"] += off
             if source == "discord-bot": s["speaker"] = it.speaker
-            elif source in ME_SOURCES: s["speaker"] = "나"
         segs += part
     segs.sort(key=lambda s: (s["startMs"], s["endMs"]))
     if words_mode:
@@ -330,7 +328,7 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
     elif source == "discord-output":
         context = "디스코드 음성 통화에서 내 PC로 들린 소리(내 목소리는 없음)"
     elif source == "laptop-mic":
-        context = "노트북 마이크로 녹음한 소리(주로 내 목소리)"
+        context = "노트북 마이크로 녹음한 소리(나와 방 안 다른 사람 목소리가 섞일 수 있음)"
     if partner:
         context = f"전화 통화 녹음. 상대: {partner}. '나'는 녹음한 사용자 본인"
     if len(b.items) > 1:
