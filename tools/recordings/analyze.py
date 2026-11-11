@@ -33,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import bundles as B
 import runlock
+import trash as T
 
 LOCAL = Path(os.environ["LOCALAPPDATA"])
 A = LOCAL / "SecondBrain" / "analysis"
@@ -370,6 +371,8 @@ def main():
     ap.add_argument("--source", choices=list(SOURCES), help="이 원천 폴더만(예: phone)")
     ap.add_argument("--pick", help="--source 안에서 이 파일 이름이 든 묶음 하나만(이미 분석했어도 다시)")
     ap.add_argument("--progress-json", action="store_true", help='진행을 "@@progress {json}" 줄로도 낸다')
+    ap.add_argument("--no-auto-remove", action="store_true", help="말소리 없는 묶음을 휴지통으로 옮기지 않는다")
+    ap.add_argument("--sweep-silent", action="store_true", help="전사하지 않고, 이미 전사된 묶음 중 말소리 없는 것을 휴지통으로(--dry-run이면 목록만)")
     a = ap.parse_args()
     global PROGRESS
     PROGRESS = a.progress_json
@@ -394,7 +397,46 @@ def main():
         runlock.release()
 
 
+def sweep_silent(a, call):
+    """이미 전사된 묶음 중 말소리 없는 것(서버 분석 글 0자)을 휴지통으로. 묶음 파일이 이 PC에 모두 있을 때만."""
+    rows = call("GET", "/api/recordings?from=2000-01-01&to=2100-01-01") or []
+    now = epoch_ms(dt.datetime.now().astimezone())
+    gone, keep = T.listed(ROOT), T.kept(ROOT)
+    rule, local = bundle_rule(lambda path: call("GET", path)), {}
+    n, n_files = 0, 0
+    for r in sorted(rows, key=lambda r: r["startedAt"]):
+        src = r.get("source")
+        if src not in T.SOURCES or (a.source and src != a.source): continue
+        if not T.is_silent(r.get("segments") or [], r.get("transcript")): continue
+        files = r.get("files") or [{"file": r["file"]}]
+        if isinstance(files, str): files = json.loads(files)
+        pre = REL_PREFIX.get(src, "")
+        paths = [ROOT / src / f["file"].removeprefix(pre) for f in files]
+        names = [p.name for p in paths]
+        when = r["startedAt"][:16].replace("T", " ")
+        if all((src, x) in gone for x in names) or any((src, x) in keep for x in names): continue
+        missing = [x for x, p in zip(names, paths) if not p.exists()]
+        if missing:
+            print(f"  건너뜀 {src} {when}: 이 PC에 없는 파일 {len(missing)}개({missing[0]}…)"); continue
+        if src not in local:   # 지금 이 PC의 묶음. 전사 뒤 같은 묶음에 파일이 더 붙었으면(말이 있을 수 있음) 건너뛴다
+            local[src] = {it.path.name: bb for bb in B.make_bundles(scan(src), rule) for it in bb.items}
+        cur = local[src].get(names[0])
+        if cur is None or {it.path.name for it in cur.items} != set(names):
+            print(f"  건너뜀 {src} {when}: 전사 뒤 묶음이 바뀜(다시 전사 필요)"); continue
+        if B.in_progress(cur, now, rule): continue
+        n += 1; n_files += len(paths)
+        if a.dry_run:
+            print(f"  후보 {src} {when}  파일 {len(paths)}개")
+        else:
+            T.move_bundle(ROOT, src, paths, r["startedAt"], spans=[(f.get("startedAt", ""), f.get("endedAt", "")) for f in files])
+            print(f"  휴지통으로 {src} {when}  파일 {len(paths)}개")
+            progress("trashed", source=src, start=r["startedAt"], files=len(paths))
+    print(f"말소리 없는 묶음 {n}개(파일 {n_files}개) " + ("— dry-run이라 옮기지 않음" if a.dry_run else f"휴지통으로 옮김({T.TRASH_DAYS}일 뒤 녹음 화면이 영구 삭제)"))
+
+
 def run(a):
+    if a.sweep_silent:
+        return sweep_silent(a, api())
     if not a.plan:
         for p in (WHISPER, ASR_MODEL, VAD_MODEL, FFMPEG):
             if not p or not Path(p).exists(): sys.exit(f"없음: {p}")
@@ -462,6 +504,14 @@ def run(a):
                   f" → 말 {body['speechMs'] / 1000:.0f}초, {len(segs)}구간 ({time.time() - t0:.1f}초)")
             progress("done", i=i, total=len(jobs), speechMs=body["speechMs"], segments=len(segs), seconds=round(time.time() - t0, 1),
                      uploaded=not a.dry_run, **bundle_info(b))
+            if (not a.no_auto_remove and b.source in T.SOURCES and T.is_silent(segs, body["transcript"])
+                    and not any((b.source, it.path.name) in T.kept(ROOT) for it in b.items)):   # 되살린 것은 그대로
+                if a.dry_run:
+                    print(f"    말소리 없음 → 휴지통 후보(dry-run이라 옮기지 않음)")
+                else:
+                    moved = T.move_bundle(ROOT, b.source, [it.path for it in b.items], iso(b.start), spans=[(iso(it.start), iso(it.end)) for it in b.items])
+                    print(f"    말소리 없음 → 휴지통으로 파일 {len(moved)}개({T.TRASH_DAYS}일 뒤 영구 삭제, 녹음 화면에서 되살리기)")
+                    progress("trashed", source=b.source, start=iso(b.start), files=len(moved))
             if a.dry_run:
                 for s in segs: print(f"    {s['startMs'] / 1000:7.1f}–{s['endMs'] / 1000:7.1f}  {(s['speaker'] + ': ') if s['speaker'] else ''}{s['text']}")
                 if body["summary"]: print("  요약:", body["summary"])
