@@ -70,6 +70,14 @@ def move_bundle(root: Path, source: str, paths: list, bundle_start: str, now: dt
     return moved
 
 
+def kept(root: Path) -> set:
+    """녹음 화면에서 되살린 (출처, 이름)(_trash\\kept.tsv). 다시 전사해도 휴지통으로 다시 옮기지 않는다."""
+    p = trash_dir(root) / "kept.tsv"
+    if not p.exists(): return set()
+    lines = p.read_text(encoding="utf-8-sig").splitlines()
+    return {(c[0], c[1]) for c in (l.split("\t") for l in lines[1:]) if len(c) > 1}
+
+
 def listed(root: Path) -> set:
     """휴지통 목록에 든 (출처, 이름)"""
     p = trash_dir(root) / "trash.tsv"

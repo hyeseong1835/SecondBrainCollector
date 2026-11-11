@@ -43,6 +43,12 @@ class TrashTests(unittest.TestCase):
         self.assertEqual(c[8:], ["2", "s1", "e1"])
         self.assertEqual(T.listed(self.root), {("phone", "20261111-090000-aaaa.m4a"), ("phone", "20261111-090040-bbbb.m4a")})
 
+    def test_kept(self):
+        self.assertEqual(T.kept(self.root), set())
+        (self.root / "_trash").mkdir()
+        (self.root / "_trash" / "kept.tsv").write_bytes("﻿source\tname\tkept_at\r\nphone\ta.m4a\t2026-11-12T10:00:00+09:00\r\n".encode())
+        self.assertEqual(T.kept(self.root), {("phone", "a.m4a")})
+
     def test_existing_three_column_tombstone(self):
         (self.root / "phone" / "deleted.tsv").write_bytes("﻿name\tfile\tdeleted_at\r\nold.m4a\told.m4a\t2026-11-11T00:00:00".encode())   # 끝 줄바꿈 없음
         T.move_bundle(self.root, "phone", self.files[:1], "s", NOW)

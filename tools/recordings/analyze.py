@@ -401,7 +401,7 @@ def sweep_silent(a, call):
     """이미 전사된 묶음 중 말소리 없는 것(서버 분석 글 0자)을 휴지통으로. 묶음 파일이 이 PC에 모두 있을 때만."""
     rows = call("GET", "/api/recordings?from=2000-01-01&to=2100-01-01") or []
     now = epoch_ms(dt.datetime.now().astimezone())
-    gone = T.listed(ROOT)
+    gone, keep = T.listed(ROOT), T.kept(ROOT)
     rule, local = bundle_rule(lambda path: call("GET", path)), {}
     n, n_files = 0, 0
     for r in sorted(rows, key=lambda r: r["startedAt"]):
@@ -414,7 +414,7 @@ def sweep_silent(a, call):
         paths = [ROOT / src / f["file"].removeprefix(pre) for f in files]
         names = [p.name for p in paths]
         when = r["startedAt"][:16].replace("T", " ")
-        if all((src, x) in gone for x in names): continue
+        if all((src, x) in gone for x in names) or any((src, x) in keep for x in names): continue
         missing = [x for x, p in zip(names, paths) if not p.exists()]
         if missing:
             print(f"  건너뜀 {src} {when}: 이 PC에 없는 파일 {len(missing)}개({missing[0]}…)"); continue
@@ -496,7 +496,8 @@ def run(a):
                   f" → 말 {body['speechMs'] / 1000:.0f}초, {len(segs)}구간 ({time.time() - t0:.1f}초)")
             progress("done", i=i, total=len(jobs), speechMs=body["speechMs"], segments=len(segs), seconds=round(time.time() - t0, 1),
                      uploaded=not a.dry_run, **bundle_info(b))
-            if not a.no_auto_remove and b.source in T.SOURCES and T.is_silent(segs, body["transcript"]):
+            if (not a.no_auto_remove and b.source in T.SOURCES and T.is_silent(segs, body["transcript"])
+                    and not any((b.source, it.path.name) in T.kept(ROOT) for it in b.items)):   # 되살린 것은 그대로
                 if a.dry_run:
                     print(f"    말소리 없음 → 휴지통 후보(dry-run이라 옮기지 않음)")
                 else:
