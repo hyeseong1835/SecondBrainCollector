@@ -52,6 +52,79 @@ static class DiscordCli
         return 0;
     }
 
+    /// <summary>입력(마이크) 장치 목록. --json이면 [{ id, name, default }](default = 기본 통신 입력 장치).</summary>
+    public static async Task<int> MicDevices(bool json)
+    {
+        var list = new List<(string Id, string Name, bool Default)>();
+        using (var en = new MMDeviceEnumerator())
+        {
+            string? defId = null;
+            try { using var d = en.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications); defId = d.ID; } catch { }
+            foreach (var d in en.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active))
+                using (d)
+                {
+                    var name = d.FriendlyName;
+                    if (!json)
+                        try { var v = d.AudioEndpointVolume; name += $"  [볼륨 {v.MasterVolumeLevelScalar * 100:F0}%{(v.Mute ? ", 음소거" : "")}]"; } catch { }
+                    list.Add((d.ID, name, d.ID == defId));
+                }
+        }
+        if (json)
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+            Console.WriteLine(JsonSerializer.Serialize(list.Select(x => new { id = x.Id, name = x.Name, @default = x.Default })));
+            return 0;
+        }
+        var cur = await CurrentSettingAsync(LaptopMicSettings.Plugin, "input_device");
+        Console.WriteLine("입력(마이크) 장치:");
+        foreach (var (id, name, def) in list)
+            Console.WriteLine($"{(id == cur ? "* " : "  ")}{name}{(def ? "  (기본 통신)" : "")}\n    {id}");
+        Console.WriteLine(string.IsNullOrEmpty(cur) ? "고른 장치 없음: 기본 통신 입력 장치를 씁니다. 바꾸기: mic-device <이름 일부|ID>" : $"고른 장치: {cur}");
+        return 0;
+    }
+
+    public static async Task<int> SetMicDevice(string key)
+    {
+        key = key.Trim();
+        if (key.Length == 0) throw new ArgumentException("장치 이름 일부나 ID, 또는 default가 필요합니다(mic-devices로 확인)");
+        if (key == "default")
+        {
+            await SetSettingAsync(LaptopMicSettings.Plugin, "input_device", JsonValue.Create(""));
+            Console.WriteLine("마이크 녹음 장치: Windows 기본 통신 입력 장치");
+            return 0;
+        }
+        string id, name;
+        using (var en = new MMDeviceEnumerator())
+        using (var d = LaptopMicSource.FindDevice(en, key)) { id = d.ID; name = d.FriendlyName; }
+        await SetSettingAsync(LaptopMicSettings.Plugin, "input_device", JsonValue.Create(id));
+        Console.WriteLine($"마이크 녹음 장치: {name}\n    {id}");
+        return 0;
+    }
+
+    /// <summary>시험용: 노트북 마이크 소스만 N초 돌려 생긴 파일 기록을 찍는다. 행은 내지 않는다(DB·실행 중인 수집기와 무관).
+    /// 장치는 --device(없으면 기본 통신 입력). 녹음 위치는 SECONDBRAIN_RECORDINGS(없으면 평소 위치).</summary>
+    public static int MicTest(string[] args)
+    {
+        var secs = args.Length > 0 && int.TryParse(args[0], out var n) ? n : 60;
+        var i = Array.IndexOf(args, "--device");
+        LaptopMicSettings.Apply(JsonDocument.Parse(JsonSerializer.Serialize(new { input_device = i >= 0 && i + 1 < args.Length ? args[i + 1] : "" })).RootElement);
+        Console.WriteLine($"녹음 위치: {Path.Combine(RecordingPaths.Root, LaptopMicSource.Folder)}, {secs}초");
+        double max = -120, sum = 0; int cnt = 0; long last = Environment.TickCount64;
+        if (args.Contains("--levels"))
+            WasapiSegmentCapture.Level = (_, db) =>
+            {
+                max = Math.Max(max, db); sum += db; cnt++;
+                if (Environment.TickCount64 - last < 5000) return;
+                Console.WriteLine($"{DateTime.Now:HH:mm:ss} 레벨 5초: 평균 {sum / cnt:F1} dBFS, 최대 {max:F1} dBFS");
+                max = -120; sum = 0; cnt = 0; last = Environment.TickCount64;
+            };
+        var src = new LaptopMicSource(m => Console.WriteLine($"{DateTime.Now:HH:mm:ss} {m}"));
+        src.Start(ev => Console.WriteLine(JsonSerializer.Serialize(ev)));
+        Thread.Sleep(TimeSpan.FromSeconds(secs));
+        src.Dispose();
+        return 0;
+    }
+
     public static async Task<int> Token()
     {
         if (Console.IsInputRedirected) throw new InvalidOperationException("터미널에서 직접 실행하세요(표준 입력 리디렉션은 받지 않습니다). 데스크톱 설정 › 플러그인에서도 넣을 수 있습니다");

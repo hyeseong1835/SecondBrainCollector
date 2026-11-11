@@ -34,6 +34,11 @@ static class Cli
           discord-token            봇 토큰과 따라갈 사용자 ID를 직접 입력해 DPAPI로 저장(화면에 표시하지 않음)
           discord-bot on|off       봇 녹음 켜기/끄기(트레이 메뉴와 같다)
 
+          노트북 마이크 녹음(플러그인 win-laptop-mic, 디스코드 통화와 상관없이 상시):
+          mic-devices [--json]     입력 장치 목록과 지금 고른 장치
+          mic-device <이름 일부|ID|default>   녹음할 입력 장치. default면 Windows 기본 통신 입력 장치를 따른다
+          mic-test [초] [--device 이름] [--levels]   시험용: 마이크 소스만 돌려 생긴 파일 기록을 찍는다(행은 안 냄). --levels는 5초마다 입력 레벨
+
         로그: %LOCALAPPDATA%\SecondBrain\collector\collector.log (옛 %LOCALAPPDATA%\LifeLog\collector는 처음 실행 때 옮긴다)
         """;
 
@@ -68,6 +73,9 @@ static class Cli
                 case "discord-token": return await DiscordCli.Token();
                 case "discord-simulate": return DiscordCli.Simulate(args[1]);
                 case "discord-bot": return await DiscordCli.Bot(args.Length > 1 ? args[1] : "");
+                case "mic-devices": return await DiscordCli.MicDevices(args.Contains("--json"));
+                case "mic-device": return await DiscordCli.SetMicDevice(string.Join(' ', args[1..]));
+                case "mic-test": return DiscordCli.MicTest(args[1..]);
                 default: Console.WriteLine(Usage); return 1;
             }
         }
