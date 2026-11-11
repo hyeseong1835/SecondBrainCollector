@@ -441,14 +441,22 @@ def run(a):
 
     llm = Llm() if a.stage == "all" else None
     spk = {}
+    failed = []   # 묶음 하나가 실패해도(GPU 메모리 부족·깨진 파일 등) 나머지는 계속한다(2026-11-12). 다음 실행 때 다시 시도된다
     try:
         for i, b in enumerate(jobs, 1):
             t0 = time.time()
             progress("start", i=i, total=len(jobs), **bundle_info(b))
-            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:   # 백신·색인기가 임시 파일을 잡고 있어도 멈추지 않게
-                body = analyze_bundle(b, Path(tmp), llm, spk, a.min_summary_chars)
-            if not a.dry_run:
-                call("PUT", "/api/recordings/analysis", body)
+            try:
+                with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:   # 백신·색인기가 임시 파일을 잡고 있어도 멈추지 않게
+                    body = analyze_bundle(b, Path(tmp), llm, spk, a.min_summary_chars)
+                if not a.dry_run:
+                    call("PUT", "/api/recordings/analysis", body)
+            except Exception as e:
+                failed.append(b)
+                msg = (str(e) or type(e).__name__).strip()
+                print(f"[{i}/{len(jobs)}] {b.source} {hms(b.start)}~{hms(b.end)[6:]}  실패, 건너뜀: {msg[-300:]}", flush=True)
+                progress("error", message=f"{b.source} {hms(b.start)} 묶음 실패(건너뜀): {msg[-200:]}", **bundle_info(b))
+                continue
             segs = body["segments"]
             print(f"[{i}/{len(jobs)}] {b.source} {hms(b.start)}~{hms(b.end)[6:]}  파일 {len(b.items)}개 {(b.end - b.start) / 1000:.0f}초"
                   f" → 말 {body['speechMs'] / 1000:.0f}초, {len(segs)}구간 ({time.time() - t0:.1f}초)")
@@ -457,7 +465,8 @@ def run(a):
             if a.dry_run:
                 for s in segs: print(f"    {s['startMs'] / 1000:7.1f}–{s['endMs'] / 1000:7.1f}  {(s['speaker'] + ': ') if s['speaker'] else ''}{s['text']}")
                 if body["summary"]: print("  요약:", body["summary"])
-        progress("end", analyzed=len(jobs), total=len(jobs))
+        print(f"끝: 묶음 {len(jobs) - len(failed)}개 완료, 실패 {len(failed)}개" + (" — " + ", ".join(f"{x.source} {hms(x.start)}" for x in failed[:20]) if failed else ""))
+        progress("end", analyzed=len(jobs) - len(failed), total=len(jobs), failed=len(failed))
     finally:
         if llm: llm.close()
 
