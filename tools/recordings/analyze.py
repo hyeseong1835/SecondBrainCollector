@@ -5,6 +5,11 @@
   python analyze.py --file X.m4a --dry-run   # 그 파일이 든 묶음 하나 시험(올리지 않음)
   python analyze.py --source phone --limit 2 --dry-run
   python analyze.py --redo          # 이미 분석한 것도 다시
+  python analyze.py --source phone --pick 20261111-140200.m4a   # 그 파일이 든 묶음 하나(이미 분석했어도 다시)
+  python analyze.py --progress-json # 사람이 읽는 줄 사이에 "@@progress {json}" 줄(데스크톱 녹음 화면이 읽음)
+
+동시 실행 막기(runlock.py): %LOCALAPPDATA%/SecondBrain/analysis/analyze.lock + 명령줄에 analyze.py가 든 다른 python 프로세스. 이미 돌고 있으면 종료 코드 3.
+진행 중인 묶음(마지막 파일 뒤 간격이 안 지남)은 --file·--pick으로 골라도 분석하지 않는다(종료 코드 4).
 
 묶음(2026-11-11, bundles.py): 같은 출처에서 앞 파일 끝~다음 파일 시작이 간격 기준(API GET /api/recordings/bundle-rule, 기본 60초) 이하면 한 묶음,
 최대 30분(넘으면 가장 긴 간격에서 나눔), 통화는 파일 하나가 한 묶음. 전사는 파일마다 해서 묶음 시각으로 옮기고, 화자 구분(간격을 무음으로 채워 이어 붙인 오디오)과 요약은 묶음 전체로 한 번에 하며,
@@ -24,6 +29,7 @@ import argparse, datetime as dt, json, os, re, subprocess, sys, tempfile, time, 
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import bundles as B
+import runlock
 
 LOCAL = Path(os.environ["LOCALAPPDATA"])
 A = LOCAL / "SecondBrain" / "analysis"
@@ -294,6 +300,7 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm", spk: dict, min_summary_
     words_mode = source in SPEAKER_SOURCES
     wavs, segs, partner = [], [], None
     for k, it in enumerate(b.items):
+        progress("step", stage="transcribe", file=k + 1, files=len(b.items))
         wav = tmp / f"p{k}.wav"
         to_wav(it.path, wav)
         wavs.append(wav)
@@ -305,6 +312,7 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm", spk: dict, min_summary_
         segs += part
     segs.sort(key=lambda s: (s["startMs"], s["endMs"]))
     if words_mode:
+        progress("step", stage="speakers")
         whole = wavs[0] if len(wavs) == 1 else join_wavs(b, wavs, tmp / "bundle.wav")
         segs, partner = assign_speakers(source, first.path, whole, segs, spk)
     transcript = " ".join(s["text"] for s in segs)
@@ -320,6 +328,7 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm", spk: dict, min_summary_
         context = (context + ". " if context else "") + f"녹음 파일 {len(b.items)}개를 시간순으로 이어 붙인 것"
     summary = None
     if len(transcript) >= min_summary_chars and LLM_MODEL.exists():
+        progress("step", stage="summary")
         summary = llm.summarize(labeled(segs) if any(s["speaker"] for s in segs) else transcript, context)
     if partner and summary:
         summary = f"통화 상대: {partner}\n{summary}"
@@ -327,6 +336,19 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm", spk: dict, min_summary_
     return {"device": SOURCES[source], "file": first.rel, "source": source, "startedAt": iso(b.start), "endedAt": iso(b.end),
             "asrModel": ASR_MODEL.stem.removeprefix("ggml-"), "llmModel": LLM_MODEL.stem if summary else None, "language": "ko",
             "speechMs": speech, "transcript": transcript, "summary": summary, "segments": segs, "files": files}
+
+
+PROGRESS = False
+
+
+def progress(event: str, **kw):
+    """--progress-json이면 기계가 읽는 진행 한 줄. 사람이 읽는 줄과 섞여 나오므로 접두어로 가른다."""
+    if PROGRESS:
+        print("@@progress " + json.dumps({"event": event, **kw}, ensure_ascii=False), flush=True)
+
+
+def bundle_info(b: "B.Bundle") -> dict:
+    return {"source": b.source, "first": Path(b.items[0].rel).name, "start": iso(b.start), "end": iso(b.end), "files": len(b.items)}
 
 
 def main():
@@ -338,7 +360,33 @@ def main():
     ap.add_argument("--limit", type=int, help="묶음 최대 N개만")
     ap.add_argument("--min-summary-chars", type=int, default=60)
     ap.add_argument("--source", choices=list(SOURCES), help="이 원천 폴더만(예: phone)")
+    ap.add_argument("--pick", help="--source 안에서 이 파일 이름이 든 묶음 하나만(이미 분석했어도 다시)")
+    ap.add_argument("--progress-json", action="store_true", help='진행을 "@@progress {json}" 줄로도 낸다')
     a = ap.parse_args()
+    global PROGRESS
+    PROGRESS = a.progress_json
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)   # 앱이 파이프로 읽어도 한 줄씩 바로·한글 그대로
+    except (AttributeError, ValueError):
+        pass
+    if a.pick and not a.source: ap.error("--pick에는 --source가 필요합니다")
+    if not a.plan:
+        busy = runlock.acquire(sys.argv[1:])
+        if busy:
+            progress("busy", pid=busy.get("pid"), started=busy.get("started"), cmd=busy.get("cmd"), via=busy.get("via"))
+            print(f"이미 analyze.py가 돌고 있습니다(PID {busy.get('pid')}" + (f", {busy['started']} 시작" if busy.get("started") else "") + "). 끝난 뒤 다시 실행하세요.")
+            sys.exit(3)
+    try:
+        run(a)
+    except BaseException as e:
+        if not isinstance(e, SystemExit) or e.code not in (0, None, 4):
+            progress("error", message=str(e) or type(e).__name__)
+        raise
+    finally:
+        runlock.release()
+
+
+def run(a):
     if not a.plan:
         for p in (WHISPER, ASR_MODEL, VAD_MODEL, FFMPEG):
             if not p or not Path(p).exists(): sys.exit(f"없음: {p}")
@@ -354,8 +402,15 @@ def main():
     for folder in folders:
         if not (ROOT / folder).exists(): continue
         bundles = B.make_bundles(scan(folder), rule)
-        if target:
-            jobs += [b for b in bundles if any(Path(it.path).resolve() == target for it in b.items)]
+        if target or a.pick:
+            hit = lambda it: Path(it.path).resolve() == target if target else Path(it.rel).name == a.pick
+            for b in bundles:
+                if not any(hit(it) for it in b.items): continue
+                if B.in_progress(b, now, rule):
+                    progress("refused", reason="in-progress", **bundle_info(b))
+                    print(f"진행 중인 묶음이라 분석하지 않습니다({hms(b.start)} ~ {hms(b.end)[6:]}, 마지막 파일 뒤 {rule['gapSec']}초가 지나지 않음).")
+                    sys.exit(4)
+                jobs.append(b)
             continue
         done = set() if a.redo else set(get("/api/recordings/analyzed?device=" + urllib.parse.quote(SOURCES[folder])) or [])
         for b in bundles:
@@ -366,14 +421,22 @@ def main():
             elif state == "분석됨": n_done += 1
             else: jobs.append(b)
     if a.limit: jobs = jobs[:a.limit]
+    if (target or a.pick) and not jobs:
+        progress("missing", file=a.file or a.pick, source=a.source)
+        print("그 파일이 든 묶음을 찾지 못했습니다(이 PC의 녹음 폴더에 파일이 없음):", a.file or f"{a.source}/{a.pick}")
     print(f"분석할 묶음 {len(jobs)}개(파일 {sum(len(b.items) for b in jobs)}개) · 이미 분석 {n_done} · 진행 중이라 건너뜀 {n_progress}")
-    if a.plan or not jobs: return
+    if not a.plan:
+        progress("plan", total=len(jobs), files=sum(len(b.items) for b in jobs), done=n_done, inProgress=n_progress, dryRun=a.dry_run)
+    if a.plan or not jobs:
+        if not a.plan: progress("end", analyzed=0, total=0)
+        return
 
     llm = Llm()
     spk = {}
     try:
         for i, b in enumerate(jobs, 1):
             t0 = time.time()
+            progress("start", i=i, total=len(jobs), **bundle_info(b))
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:   # 백신·색인기가 임시 파일을 잡고 있어도 멈추지 않게
                 body = analyze_bundle(b, Path(tmp), llm, spk, a.min_summary_chars)
             if not a.dry_run:
@@ -381,9 +444,12 @@ def main():
             segs = body["segments"]
             print(f"[{i}/{len(jobs)}] {b.source} {hms(b.start)}~{hms(b.end)[6:]}  파일 {len(b.items)}개 {(b.end - b.start) / 1000:.0f}초"
                   f" → 말 {body['speechMs'] / 1000:.0f}초, {len(segs)}구간 ({time.time() - t0:.1f}초)")
+            progress("done", i=i, total=len(jobs), speechMs=body["speechMs"], segments=len(segs), seconds=round(time.time() - t0, 1),
+                     uploaded=not a.dry_run, **bundle_info(b))
             if a.dry_run:
                 for s in segs: print(f"    {s['startMs'] / 1000:7.1f}–{s['endMs'] / 1000:7.1f}  {(s['speaker'] + ': ') if s['speaker'] else ''}{s['text']}")
                 if body["summary"]: print("  요약:", body["summary"])
+        progress("end", analyzed=len(jobs), total=len(jobs))
     finally:
         llm.close()
 
