@@ -4,6 +4,7 @@
   - 노트북: <Dest>/phone/<날짜>/<이름>.m4a. 이미 있고 크기가 같으면 건너뜀
   - 가져온 뒤 폰과 노트북의 sha256을 견주고, 같을 때만 제자리 이름으로 바꾼다. 폰 사본은 지우지 않는다
   - <Dest>/phone/index.tsv에 한 줄씩(파일, 바이트, sha256, 가져온 시각)
+  - 녹음 화면에서 지운 파일(<Dest>/phone/deleted.tsv, 묘비)은 건너뜀(result reason deleted)
 무선 디버깅(adb pair/connect)으로 붙어 있어도 같은 스크립트로 된다. 기기가 여럿이면 ANDROID_SERIAL로 고른다(없으면 USB 쪽).
 -ProgressJson: "@@progress {json}" 줄(plan·file·result·end, 연결 안 됨은 error, 이미 도는 중이면 busy)도 낸다(데스크톱 녹음 화면).
 종료 코드: 0 성공, 1 실패한 파일 있음, 2 연결 안 됨, 3 이미 가져오는 중.
@@ -27,9 +28,11 @@ $files = @($list | Where-Object { $_ -match '^\d+ \./' } | ForEach-Object { $p =
 Write-Host "폰 녹음 파일 $($files.Count)개"
 Progress 'plan' @{ kind = 'phone'; total = $files.Count; device = $env:ANDROID_SERIAL }
 
+$deleted = Get-Deleted $localRoot
 $pulled = 0; $skipped = 0; $bad = 0; $i = 0
 foreach ($f in $files) {
     $i++
+    if ($deleted.Contains(($f.Rel -split '/')[-1])) { $skipped++; Progress 'result' @{ i = $i; status = 'skipped'; name = $f.Rel; reason = 'deleted' }; continue }
     $local = Join-Path $localRoot ($f.Rel -replace '/', '\')
     if ((Test-Path $local) -and (Get-Item $local).Length -eq $f.Bytes) { $skipped++; Progress 'result' @{ i = $i; status = 'skipped'; name = $f.Rel }; continue }   # 위치는 가져올 때 이미 적었다
     Progress 'file' @{ i = $i; total = $files.Count; name = $f.Rel; bytes = $f.Bytes }
