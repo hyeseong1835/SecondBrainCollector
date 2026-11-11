@@ -94,6 +94,7 @@ public sealed class Host : IAsyncDisposable
         }
         if (_plugins.Count == 0) Log("켜진 플러그인이 없습니다. `install`로 플러그인을 넣고 `enable`로 켜세요.");
         await ApplyDiscordSettingsAsync();
+        LaptopMicSettings.Apply(_installs.GetValueOrDefault(LaptopMicSettings.Plugin)?.Settings);
 
         // 플러그인 start (디스패처에서)
         foreach (var p in _plugins)
@@ -135,7 +136,7 @@ public sealed class Host : IAsyncDisposable
         while (Queue.Count() > 0 && _uploader.LastError is null) await Task.Delay(500);
     }
 
-    public static readonly HashSet<string> KnownSources = ["window", "idle", "power", "media", "input", "battery", "discord_output", "discord_bot"];
+    public static readonly HashSet<string> KnownSources = ["window", "idle", "power", "media", "input", "battery", "discord_output", "discord_bot", "laptop_mic"];
 
     private ISource? CreateSource(string id) => id switch
     {
@@ -147,6 +148,7 @@ public sealed class Host : IAsyncDisposable
         "battery" => new BatterySource(),
         "discord_output" => new DiscordOutputSource(Log),
         "discord_bot" => new DiscordBotSource(Log),
+        "laptop_mic" => new LaptopMicSource(Log),
         _ => null,
     };
 

@@ -18,8 +18,10 @@ src/LifeLog.Collector.Windows/    exe (net10.0-windows)
   Dispatcher.cs 모든 JS는 이 스레드에서만
   Sources/      window(SetWinEventHook), idle(GetLastInputInfo), power(SystemEvents), media(GSMTC),
                 input(저수준 훅으로 분당 횟수만), battery(GetSystemPowerStatus),
-                discord_output(WASAPI 루프백 상시 녹음), discord_bot(디스코드 봇 사람별 녹음, 켰을 때만)
-  Sources/Recording/  M4aWriter(ffmpeg로 16kHz 모노 AAC 32kbps .m4a), DiscordSettings(discord.json, 토큰 DPAPI)
+                discord_output(WASAPI 루프백 상시 녹음), discord_bot(디스코드 봇 사람별 녹음, 켰을 때만),
+                laptop_mic(노트북 마이크 상시 녹음)
+  Sources/Recording/  M4aWriter(ffmpeg로 16kHz 모노 AAC 32kbps .m4a), Segmenter(소리 있는 구간 판정, 폰과 같은 규칙),
+                WasapiSegmentCapture(WASAPI 캡처 → Segmenter, 루프백·입력 공용), DiscordSettings·LaptopMicSettings(플러그인 설정)
 ```
 
 ## 쓰는 법
@@ -46,6 +48,14 @@ $EXE autostart on        # 로그온 시 `run --tray` (작업 스케줄러)
 - AAC 인코딩은 ffmpeg(`SECONDBRAIN_FFMPEG` → `%LOCALAPPDATA%\SecondBrainnalysisfmpeg` → PATH). Media Foundation AAC는 16kHz·32kbps를 못 쓴다.
 - `discord-simulate <wav>`: WAV를 상시 녹음 구간 규칙에 흘려 본다(시험용, `%TEMP%\secondbrain-simulate`에 씀).
 - 분석: `tools/recordings/analyze.py`가 `discord-output`·`discord-bot`(기기 laptop)을 읽는다. 봇 파일은 세그먼트 speaker = 디스코드 표시 이름.
+
+## 노트북 마이크 녹음 (2026-11-11)
+- 디스코드 통화와 상관없이 마이크를 상시 녹음한다(소리 있는 구간만, 구간 규칙·열은 discord-output·phone-audio와 같다). 플러그인 `win-laptop-mic`, 소스 `laptop_mic`.
+  디스코드 출력 녹음(상대 목소리만)과 파일을 따로 둔다: `%USERPROFILE%\SecondBrainRecordings\laptop-mic\날짜\*.m4a`.
+- 장치: 설정 `input_device`(ID 또는 이름 일부). 비면 Windows 기본 통신 입력 장치를 쓰고 기본 장치가 바뀌면 다시 붙는다. `mic-devices`로 목록, `mic-device <이름|ID|default>`로 정한다.
+- 켜고 끄기: `install plugins/win-laptop-mic --grant-all` / `disable win-laptop-mic` / `enable win-laptop-mic`.
+- `mic-test [초] [--device 이름]`: DB 없이 마이크 소스만 돌려 생긴 파일 기록을 찍는다(시험용, `SECONDBRAIN_RECORDINGS`로 위치를 바꿀 수 있다).
+- Windows 설정 › 개인 정보 › 마이크 › "데스크톱 앱이 마이크에 액세스하도록 허용"이 꺼져 있으면 무음만 들어온다(파일이 안 생김).
 
 ## 원시 기능
 `ctx.file.list(dir, pattern)`, `ctx.file.read(path, { from, max })` → `{ text, next, size, eof }`, `ctx.file.stat(path)`. 매니페스트의 `file:read:<경로 접두어>`(`~`·`%VAR%` 가능) 아래만 읽는다. `plugins/claude-session`(`~/.claude/projects`의 세션 jsonl)과 `plugins/vscode`(`collector-vscode` 확장이 쓰는 events.jsonl)가 예다. 둘 다 이어 읽기이고 상태에 읽은 위치를 둔다.
