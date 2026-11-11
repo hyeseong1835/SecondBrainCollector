@@ -19,8 +19,8 @@ Enter-PullLock
 Connect-Phone
 $done = 0; $missing = 0; $bad = 0
 foreach ($f in @($Files -split '\|' | Where-Object { $_ })) {
-    $rel = $f -replace '\', '/'
-    if ($rel -match '(^|/)\.\.(/|$)' -or $rel.StartsWith('/') -or ($Kind -eq 'call' -and $rel.Contains('/'))) {
+    $rel = $f.Replace([char]92, [char]47)   # 역슬래시 → /
+    if (-not $rel -or -not $rel.EndsWith('.m4a') -or $rel -match '(^|/)\.\.(/|$)' -or $rel.StartsWith('/') -or ($Kind -eq 'call' -and $rel.Contains('/'))) {
         Write-Host "  거절(경로): $f" -ForegroundColor Yellow; $bad++; Progress 'result' @{ name = $f; status = 'failed'; reason = 'path' }; continue
     }
     $path = "$root/$rel"
