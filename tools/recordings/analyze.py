@@ -1,8 +1,14 @@
 """녹음 2차 분석(2026-11-11): 노트북(eGPU RX 6600, Vulkan)에서 전사·요약하고 결과만 SecondBrain API에 올린다. 원본 오디오는 올리지 않는다.
 
-  python analyze.py                 # 아직 분석하지 않은 녹음 전부
-  python analyze.py --file X.m4a --dry-run   # 파일 하나 시험(올리지 않음)
+  python analyze.py                 # 아직 분석하지 않은 묶음 전부(진행 중인 묶음은 건너뜀)
+  python analyze.py --plan          # 묶음과 상태(분석됨·분석할 것·진행 중)만 보기
+  python analyze.py --file X.m4a --dry-run   # 그 파일이 든 묶음 하나 시험(올리지 않음)
+  python analyze.py --source phone --limit 2 --dry-run
   python analyze.py --redo          # 이미 분석한 것도 다시
+
+묶음(2026-11-11, bundles.py): 같은 출처에서 앞 파일 끝~다음 파일 시작이 간격 기준(API GET /api/recordings/bundle-rule, 기본 60초) 이하면 한 묶음,
+최대 30분(넘으면 가장 긴 간격에서 나눔), 통화는 파일 하나가 한 묶음. 전사는 파일마다 해서 묶음 시각으로 옮기고, 화자 구분(간격을 무음으로 채워 이어 붙인 오디오)과 요약은 묶음 전체로 한 번에 하며,
+결과는 묶음 한 줄(file = 첫 파일, files = 든 파일·오프셋, 구간 시각은 묶음 시작 기준)로 올린다.
 
 녹음 위치: %USERPROFILE%/SecondBrainRecordings/<원천>/<날짜>/<이름>.m4a
   phone/           폰 녹음(pull-recordings.ps1이 가져옴). 기기 phone
@@ -16,6 +22,8 @@ API: %LOCALAPPDATA%/SecondBrain/api.json의 url·key(훅 키)
 """
 import argparse, datetime as dt, json, os, re, subprocess, sys, tempfile, time, urllib.parse, urllib.request
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+import bundles as B
 
 LOCAL = Path(os.environ["LOCALAPPDATA"])
 A = LOCAL / "SecondBrain" / "analysis"
@@ -59,7 +67,7 @@ def started_from_name(path: Path) -> dt.datetime:
 # ---- 디스코드 봇 녹음(discord-bot) ----
 # 수집기 DiscordBotSource가 사람별 파일 옆에 같은 이름의 .json을 둔다:
 #   { user_id, speaker(표시 이름), username, guild_id, guild, channel_id, channel, start, end, duration_ms, ... }
-# 파일 하나 = 한 사람이므로 모든 세그먼트의 speaker를 그 사람의 표시 이름으로 채운다.
+# 파일 하나 = 한 사람. 묶음 안에서 사람(user_id)마다 트랙을 따로 이어 붙여 전사하고, 그 트랙 구간의 speaker를 그 사람의 표시 이름으로 채운다.
 
 def discord_bot_meta(f: Path):
     """봇 녹음 옆 .json. 없거나 깨졌으면 None."""
@@ -70,22 +78,17 @@ def discord_bot_meta(f: Path):
         return None
 
 
-def apply_discord_bot(f: Path, segs: list, start: dt.datetime):
-    """세그먼트 speaker에 디스코드 표시 이름을 넣고, 시작 시각을 .json의 것으로 바꾼다. (start, 요약 문맥)을 돌려준다."""
-    meta = discord_bot_meta(f)
+def discord_bot_who(meta: dict | None):
+    """(트랙 키, 화자 이름). .json이 없으면 ('', None)"""
     if not meta:
-        return start, None
+        return "", None
     speaker = meta.get("speaker") or meta.get("username") or meta.get("user_id")
-    for s in segs:
-        s["speaker"] = speaker
-    if meta.get("start"):
-        try:
-            start = dt.datetime.fromisoformat(meta["start"])
-        except ValueError:
-            pass
-    where = " / ".join(x for x in (meta.get("guild"), meta.get("channel")) if x)
-    return start, f"디스코드 음성 채널({where})에서 {speaker}이(가) 한 말"
+    return str(meta.get("user_id") or speaker or ""), speaker
 
+
+def discord_bot_context(metas: list) -> str:
+    where = next((" / ".join(x for x in (m.get("guild"), m.get("channel")) if x) for m in metas if m), "")
+    return f"디스코드 음성 채널({where})에서 나눈 말. 줄 앞 이름이 말한 사람"
 
 def source_of(f: Path) -> str:
     """--file로 받은 파일의 원천: .../SecondBrainRecordings/<원천>/<날짜>/<이름>.m4a"""
@@ -175,70 +178,214 @@ def labeled(segs: list) -> str:
     return " ".join(out).strip()
 
 
+# ---- 묶음(bundles.py) ----
+# 같은 출처에서 간격이 짧은 파일들을 한 묶음으로 이어 붙여(간격은 무음으로 채워 시각을 맞춤) 한 번에 전사·화자 구분·요약한다.
+# 결과 한 줄 = 묶음 하나(file = 첫 파일, files = 든 파일과 묶음 시작부터의 오프셋). 구간 시각은 묶음 시작 기준.
+
+def m4a_duration_ms(path: Path) -> int:
+    """MP4/M4A 길이(ms): 맨 위 상자에서 moov → mvhd의 timescale·duration. 못 읽으면 0. (데스크톱 RecordingsPage.M4aDurationMs와 같은 방식)"""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            size_all = f.seek(0, 2)
+            pos = 0
+            while pos + 8 <= size_all:
+                f.seek(pos)
+                size, typ = struct.unpack(">I4s", f.read(8))
+                head = 8
+                if size == 1:
+                    size = struct.unpack(">Q", f.read(8))[0]; head = 16
+                elif size == 0:
+                    size = size_all - pos
+                if size < 8: return 0
+                if typ == b"moov":
+                    inner, end = pos + head, pos + size
+                    while inner + 8 <= end:
+                        f.seek(inner)
+                        isize, ityp = struct.unpack(">I4s", f.read(8))
+                        if ityp == b"mvhd":
+                            ver = f.read(4)[0]
+                            if ver == 1:
+                                f.read(16); ts, du = struct.unpack(">IQ", f.read(12))
+                            else:
+                                f.read(8); ts, du = struct.unpack(">II", f.read(8))
+                            return du * 1000 // ts if ts else 0
+                        if isize < 8: return 0
+                        inner += isize
+                    return 0
+                pos += size
+    except (OSError, struct.error, IndexError):
+        pass
+    return 0
+
+
+def epoch_ms(t: dt.datetime) -> int:
+    return int(t.timestamp() * 1000)
+
+
+def iso(ms: int) -> str:
+    return dt.datetime.fromtimestamp(ms / 1000).astimezone().isoformat()
+
+
+def hms(ms: int) -> str:
+    return dt.datetime.fromtimestamp(ms / 1000).strftime("%m-%d %H:%M:%S")
+
+
+def scan(folder: str) -> list:
+    """원천 폴더의 녹음 → bundles.Item 목록. 시작은 파일 이름(디스코드 봇은 옆 .json), 끝은 시작 + m4a 길이."""
+    base = ROOT / folder
+    out = []
+    for f in sorted(base.rglob("*.m4a")):
+        rel = REL_PREFIX.get(folder, "") + f.relative_to(base).as_posix()
+        start = epoch_ms(started_from_name(f))
+        dur = m4a_duration_ms(f)
+        track, speaker = "", None
+        if folder == "discord-bot":
+            meta = discord_bot_meta(f)
+            track, speaker = discord_bot_who(meta)
+            if meta and meta.get("start"):
+                try: start = epoch_ms(dt.datetime.fromisoformat(meta["start"]))
+                except ValueError: pass
+            if meta and not dur and meta.get("duration_ms"): dur = int(meta["duration_ms"])
+        out.append(B.Item(folder, rel, start, start + max(dur, 1), f, track, speaker))
+    return out
+
+
+def bundle_rule(get) -> dict:
+    try:
+        r = get("/api/recordings/bundle-rule")
+        return {"gapSec": int(r["gapSec"]), "maxSec": int(r["maxSec"]), "singleSources": list(r.get("singleSources") or [])}
+    except Exception as e:
+        print("  묶음 규칙을 API에서 못 받아 기본값을 쓴다:", e)
+        return dict(B.DEFAULT_RULE)
+
+
+def read_wav_i16(path: Path):
+    import numpy as np, wave
+    with wave.open(str(path)) as w:
+        return np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+
+
+def write_wav_i16(path: Path, samples):
+    import wave
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(samples.tobytes())
+
+
+def join_wavs(b: "B.Bundle", wavs: list, dst: Path) -> Path:
+    """묶음 길이의 무음 위에 파일들을 제 시각(묶음 시작 기준 오프셋)에 얹은 16kHz wav. 겹치면 더한다."""
+    import numpy as np
+    total = (b.end - b.start) * 16
+    buf = np.zeros(total, dtype=np.int32)
+    for it, wav in zip(b.items, wavs):
+        x = read_wav_i16(wav)
+        at = (it.start - b.start) * 16
+        n = max(0, min(len(x), total - at))
+        buf[at:at + n] += x[:n]
+    write_wav_i16(dst, np.clip(buf, -32768, 32767).astype(np.int16))
+    return dst
+
+
+def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm", spk: dict, min_summary_chars: int):
+    """묶음 하나를 전사·화자 구분·요약. → API 본문(segments 포함)
+    전사는 파일마다 하고 시각에 오프셋을 더한다: 무음을 채워 이어 붙인 긴 wav를 whisper.cpp VAD로 돌리면 구간 시각이 수백 초씩 어긋났다(2026-11-11 실측).
+    녹음은 5초 무음 뒤에만 파일을 끊으므로 경계에서 말이 잘리는 일은 드물다. 화자 구분(sherpa)과 요약은 묶음 전체로 한 번에."""
+    source, first = b.source, b.items[0]
+    words_mode = source in SPEAKER_SOURCES
+    wavs, segs, partner = [], [], None
+    for k, it in enumerate(b.items):
+        wav = tmp / f"p{k}.wav"
+        to_wav(it.path, wav)
+        wavs.append(wav)
+        part = transcribe(wav, tmp / "a", words=words_mode)
+        off = it.start - b.start
+        for s in part:
+            s["startMs"] += off; s["endMs"] += off
+            if source == "discord-bot": s["speaker"] = it.speaker
+        segs += part
+    segs.sort(key=lambda s: (s["startMs"], s["endMs"]))
+    if words_mode:
+        whole = wavs[0] if len(wavs) == 1 else join_wavs(b, wavs, tmp / "bundle.wav")
+        segs, partner = assign_speakers(source, first.path, whole, segs, spk)
+    transcript = " ".join(s["text"] for s in segs)
+    speech = sum(s["endMs"] - s["startMs"] for s in segs)
+    context = None
+    if source == "discord-bot":
+        context = discord_bot_context([discord_bot_meta(it.path) for it in b.items])
+    elif source == "discord-output":
+        context = "디스코드 음성 통화에서 내 PC로 들린 소리(내 목소리는 없음)"
+    if partner:
+        context = f"전화 통화 녹음. 상대: {partner}. '나'는 녹음한 사용자 본인"
+    if len(b.items) > 1:
+        context = (context + ". " if context else "") + f"녹음 파일 {len(b.items)}개를 시간순으로 이어 붙인 것"
+    summary = None
+    if len(transcript) >= min_summary_chars and LLM_MODEL.exists():
+        summary = llm.summarize(labeled(segs) if any(s["speaker"] for s in segs) else transcript, context)
+    if partner and summary:
+        summary = f"통화 상대: {partner}\n{summary}"
+    files = [{"file": it.rel, "startedAt": iso(it.start), "endedAt": iso(it.end), "offsetMs": it.start - b.start} for it in b.items]
+    return {"device": SOURCES[source], "file": first.rel, "source": source, "startedAt": iso(b.start), "endedAt": iso(b.end),
+            "asrModel": ASR_MODEL.stem.removeprefix("ggml-"), "llmModel": LLM_MODEL.stem if summary else None, "language": "ko",
+            "speechMs": speech, "transcript": transcript, "summary": summary, "segments": segs, "files": files}
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--file"); ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--redo", action="store_true")
+    ap.add_argument("--file", help="이 파일이 든 묶음 하나만")
+    ap.add_argument("--dry-run", action="store_true", help="분석은 하되 올리지 않는다")
+    ap.add_argument("--plan", action="store_true", help="묶음과 상태만 보이고 분석하지 않는다")
+    ap.add_argument("--redo", action="store_true", help="이미 분석한 묶음도 다시")
+    ap.add_argument("--limit", type=int, help="묶음 최대 N개만")
     ap.add_argument("--min-summary-chars", type=int, default=60)
     ap.add_argument("--source", choices=list(SOURCES), help="이 원천 폴더만(예: phone)")
     a = ap.parse_args()
-    for p in (WHISPER, ASR_MODEL, VAD_MODEL, FFMPEG):
-        if not p or not Path(p).exists(): sys.exit(f"없음: {p}")
-    call = None if a.dry_run else api()
+    if not a.plan:
+        for p in (WHISPER, ASR_MODEL, VAD_MODEL, FFMPEG):
+            if not p or not Path(p).exists(): sys.exit(f"없음: {p}")
+    call = api()
+    get = lambda path: call("GET", path)
+    rule = bundle_rule(get)
+    now = epoch_ms(dt.datetime.now().astimezone())
+    print(f"묶음 규칙: 간격 {rule['gapSec']}초 이하 · 최대 {rule['maxSec'] // 60}분 · 묶지 않음 {', '.join(rule['singleSources']) or '-'}")
 
-    jobs = []   # (원천, 기기, 상대 경로, 절대 경로)
-    if a.file:
-        f = Path(a.file).resolve()
-        src = source_of(f)
-        jobs.append((src, SOURCES[src], REL_PREFIX.get(src, "") + f.relative_to(ROOT / src).as_posix() if f.is_relative_to(ROOT / src) else f.name, f))
-    else:
-        for folder, device in SOURCES.items():
-            if a.source and folder != a.source: continue
-            base = ROOT / folder
-            if not base.exists(): continue
-            done = set() if a.redo else set(call("GET", "/api/recordings/analyzed?device=" + urllib.parse.quote(device)) or [])
-            for f in sorted(base.rglob("*.m4a")):
-                rel = REL_PREFIX.get(folder, "") + f.relative_to(base).as_posix()
-                if rel not in done: jobs.append((folder, device, rel, f))
-    print(f"분석할 녹음 {len(jobs)}개")
+    target = Path(a.file).resolve() if a.file else None
+    folders = [source_of(target)] if target else [x for x in SOURCES if not a.source or x == a.source]
+    jobs, n_done, n_progress = [], 0, 0
+    for folder in folders:
+        if not (ROOT / folder).exists(): continue
+        bundles = B.make_bundles(scan(folder), rule)
+        if target:
+            jobs += [b for b in bundles if any(Path(it.path).resolve() == target for it in b.items)]
+            continue
+        done = set() if a.redo else set(get("/api/recordings/analyzed?device=" + urllib.parse.quote(SOURCES[folder])) or [])
+        for b in bundles:
+            state = "진행 중" if B.in_progress(b, now, rule) else "분석됨" if all(it.rel in done for it in b.items) else "분석할 것"
+            if a.plan:
+                print(f"  {folder:14} {hms(b.start)} ~ {hms(b.end)[6:]}  파일 {len(b.items):3}개  {state}")
+            if state == "진행 중": n_progress += 1
+            elif state == "분석됨": n_done += 1
+            else: jobs.append(b)
+    if a.limit: jobs = jobs[:a.limit]
+    print(f"분석할 묶음 {len(jobs)}개(파일 {sum(len(b.items) for b in jobs)}개) · 이미 분석 {n_done} · 진행 중이라 건너뜀 {n_progress}")
+    if a.plan or not jobs: return
 
     llm = Llm()
     spk = {}
     try:
-        with tempfile.TemporaryDirectory() as tmp:
-            for i, (source, device, rel, f) in enumerate(jobs, 1):
-                t0 = time.time()
-                wav = Path(tmp) / "a.wav"
-                dur = to_wav(f, wav)
-                segs = transcribe(wav, Path(tmp) / "a", words=source in SPEAKER_SOURCES)
-                partner = None
-                if source in SPEAKER_SOURCES:
-                    segs, partner = assign_speakers(source, f, wav, segs, spk)
-                transcript = " ".join(s["text"] for s in segs)
-                speech = sum(s["endMs"] - s["startMs"] for s in segs)
-                start, context = started_from_name(f), None
-                if source == "discord-bot":
-                    start, context = apply_discord_bot(f, segs, start)
-                elif source == "discord-output":
-                    context = "디스코드 음성 통화에서 내 PC로 들린 소리(내 목소리는 없음)"
-                summary = None
-                if partner:
-                    context = f"전화 통화 녹음. 상대: {partner}. '나'는 녹음한 사용자 본인"
-                if len(transcript) >= a.min_summary_chars and LLM_MODEL.exists():
-                    summary = llm.summarize(labeled(segs) if any(s["speaker"] for s in segs) else transcript, context)
-                if partner and summary:
-                    summary = f"통화 상대: {partner}\n{summary}"
-                body = {"device": device, "file": rel, "source": source, "startedAt": start.isoformat(), "endedAt": (start + dt.timedelta(milliseconds=dur)).isoformat(),
-                        "asrModel": ASR_MODEL.stem.removeprefix("ggml-"), "llmModel": LLM_MODEL.stem if summary else None, "language": "ko",
-                        "speechMs": speech, "transcript": transcript, "summary": summary, "segments": segs}
-                if call:
-                    call("PUT", "/api/recordings/analysis", body)
-                print(f"[{i}/{len(jobs)}] {rel}  {dur/1000:.0f}초 → 말 {speech/1000:.0f}초, {len(segs)}구간 ({time.time()-t0:.1f}초)")
-                if a.dry_run:
-                    for s in segs: print(f"    {s['startMs']/1000:7.1f}–{s['endMs']/1000:7.1f}  {(s['speaker'] + ': ') if s['speaker'] else ''}{s['text']}")
-                    if summary: print("  요약:", summary)
+        for i, b in enumerate(jobs, 1):
+            t0 = time.time()
+            with tempfile.TemporaryDirectory() as tmp:
+                body = analyze_bundle(b, Path(tmp), llm, spk, a.min_summary_chars)
+            if not a.dry_run:
+                call("PUT", "/api/recordings/analysis", body)
+            segs = body["segments"]
+            print(f"[{i}/{len(jobs)}] {b.source} {hms(b.start)}~{hms(b.end)[6:]}  파일 {len(b.items)}개 {(b.end - b.start) / 1000:.0f}초"
+                  f" → 말 {body['speechMs'] / 1000:.0f}초, {len(segs)}구간 ({time.time() - t0:.1f}초)")
+            if a.dry_run:
+                for s in segs: print(f"    {s['startMs'] / 1000:7.1f}–{s['endMs'] / 1000:7.1f}  {(s['speaker'] + ': ') if s['speaker'] else ''}{s['text']}")
+                if body["summary"]: print("  요약:", body["summary"])
     finally:
         llm.close()
-
 
 if __name__ == "__main__":
     main()
