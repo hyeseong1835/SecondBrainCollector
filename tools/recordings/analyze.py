@@ -8,6 +8,8 @@
   phone/           폰 녹음(pull-recordings.ps1이 가져옴). 기기 phone
   discord-output/  디스코드 출력 장치 녹음(데스크톱 수집기). 기기 laptop
   discord-bot/     디스코드 봇 녹음(데스크톱 수집기, 사람별 파일 + 옆 .json에 화자). 기기 laptop. 세그먼트 speaker = 디스코드 표시 이름
+  call/            삼성 통화 녹음(pull-call-recordings.ps1이 가져옴). 기기 phone, file은 "call/<날짜>/통화 <상대>_<YYMMDD>_<HHMMSS>.m4a"
+화자 구분: speakers.py(sherpa-onnx). phone·call만. '나' 기준은 python speakers.py enroll로 먼저 만든다(없으면 화자1·화자2…만)
 도구·모델: %LOCALAPPDATA%/SecondBrain/analysis (whisper.cpp Vulkan 빌드, ffmpeg, llama.cpp Vulkan, 모델들)
   전사 batisay-ko-turbo q8_0 + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
 API: %LOCALAPPDATA%/SecondBrain/api.json의 url·key(훅 키)
@@ -24,7 +26,8 @@ LLM_MODEL = A / "models" / "EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf"
 LLAMA = A / "llama" / "llama-server.exe"
 FFMPEG = next((A / "ffmpeg").rglob("ffmpeg.exe"), None)
 ROOT = Path(os.environ["USERPROFILE"]) / "SecondBrainRecordings"
-SOURCES = {"phone": "phone", "discord-output": "laptop", "discord-bot": "laptop"}   # 폴더 → 기기
+SOURCES = {"phone": "phone", "discord-output": "laptop", "discord-bot": "laptop", "call": "phone"}   # 폴더 → 기기
+REL_PREFIX = {"call": "call/"}   # 같은 기기(phone)의 폰 녹음과 file 이름이 겹치지 않게
 LLM_PORT = 8089
 # whisper가 말소리 없는 곳에서 지어내는 흔한 문장(유튜브 자막 학습 흔적)
 HALLUCINATIONS = re.compile(r"^(시청해\s*주셔서\s*감사합니다|구독과\s*좋아요|MBC\s*뉴스|자막\s*제공|[.\s,!?♪]*)$")
@@ -44,6 +47,9 @@ def api():
 
 
 def started_from_name(path: Path) -> dt.datetime:
+    m = re.search(r"_(\d{6})_(\d{6})$", path.stem)   # 통화 녹음: 통화 <상대>_YYMMDD_HHMMSS
+    if m:
+        return dt.datetime.strptime("20" + m.group(1) + m.group(2), "%Y%m%d%H%M%S").astimezone()
     m = re.match(r"(\d{8})-(\d{6})", path.stem)
     if not m:
         return dt.datetime.fromtimestamp(path.stat().st_mtime).astimezone()
@@ -92,9 +98,10 @@ def to_wav(src: Path, dst: Path):
     return (dst.stat().st_size - 44) // 2 * 1000 // 16000   # 길이(ms)
 
 
-def transcribe(wav: Path, out_base: Path):
+def transcribe(wav: Path, out_base: Path, words: bool = False):
+    """words=True면 단어마다 한 구간(-ml 1 -sow). 화자 구분(assign_speakers)이 화자별로 다시 묶는다"""
     cmd = [str(WHISPER), "-m", str(ASR_MODEL), "-l", "ko", "-f", str(wav), "-oj", "-of", str(out_base), "-np",
-           "--vad", "-vm", str(VAD_MODEL), "-vsd", "500", "-vp", "200"]
+           "--vad", "-vm", str(VAD_MODEL), "-vsd", "500", "-vp", "200"] + (["-ml", "1", "-sow"] if words else [])
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if p.returncode != 0:
         raise RuntimeError("whisper 실패: " + p.stderr[-400:])
@@ -136,6 +143,38 @@ class Llm:
             self.proc.terminate()
 
 
+SPEAKER_SOURCES = ("phone", "call")   # 화자 구분(speakers.py)을 하는 원천. 전사를 단어 단위로 받는다
+
+
+def assign_speakers(source: str, f: Path, wav: Path, words: list, state: dict):
+    """단어 구간(transcribe(words=True))에 화자를 붙이고 화자·틈 단위로 다시 묶는다. 통화는 나·상대 이름, 폰 녹음은 나·화자1·화자2….
+    sherpa-onnx나 모델이 없으면 화자 없이 묶기만 한다. → (구간들, 통화 상대 이름 또는 None)"""
+    import speakers as sp   # numpy만 쓴다. sherpa-onnx는 Diarizer가 부를 때
+    partner = sp.call_partner(f) if source == "call" else None
+    if words and "d" not in state:
+        try:
+            state["d"], state["me"] = sp.Diarizer(), sp.Me.load()
+            if state["me"] is None: print("  ('나' 기준 없음: python speakers.py enroll)")
+        except Exception as e:
+            print("  화자 구분 건너뜀:", e); state["d"] = None
+    if words and state.get("d"):
+        turns, embs = state["d"].diarize(sp.load_wav(wav))   # 화자 수는 정하지 않는다(잘게 나눈 뒤 name_clusters가 합친다)
+        sp.label_segments(words, turns, sp.name_clusters(embs, state["me"], turns, partner))
+    segs = [s for s in sp.group_words(words) if not HALLUCINATIONS.match(s["text"])]
+    return segs, partner
+
+
+def labeled(segs: list) -> str:
+    """요약에 줄 전사. 화자가 있으면 바뀔 때마다 '이름: '을 붙인다"""
+    out, last = [], object()
+    for s in segs:
+        if s["speaker"] and s["speaker"] != last:
+            out.append(f"\n{s['speaker']}: {s['text']}"); last = s["speaker"]
+        else:
+            out.append(s["text"])
+    return " ".join(out).strip()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file"); ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--redo", action="store_true")
@@ -150,7 +189,7 @@ def main():
     if a.file:
         f = Path(a.file).resolve()
         src = source_of(f)
-        jobs.append((src, SOURCES[src], f.relative_to(ROOT / src).as_posix() if f.is_relative_to(ROOT / src) else f.name, f))
+        jobs.append((src, SOURCES[src], REL_PREFIX.get(src, "") + f.relative_to(ROOT / src).as_posix() if f.is_relative_to(ROOT / src) else f.name, f))
     else:
         for folder, device in SOURCES.items():
             if a.source and folder != a.source: continue
@@ -158,18 +197,22 @@ def main():
             if not base.exists(): continue
             done = set() if a.redo else set(call("GET", "/api/recordings/analyzed?device=" + urllib.parse.quote(device)) or [])
             for f in sorted(base.rglob("*.m4a")):
-                rel = f.relative_to(base).as_posix()
+                rel = REL_PREFIX.get(folder, "") + f.relative_to(base).as_posix()
                 if rel not in done: jobs.append((folder, device, rel, f))
     print(f"분석할 녹음 {len(jobs)}개")
 
     llm = Llm()
+    spk = {}
     try:
         with tempfile.TemporaryDirectory() as tmp:
             for i, (source, device, rel, f) in enumerate(jobs, 1):
                 t0 = time.time()
                 wav = Path(tmp) / "a.wav"
                 dur = to_wav(f, wav)
-                segs = transcribe(wav, Path(tmp) / "a")
+                segs = transcribe(wav, Path(tmp) / "a", words=source in SPEAKER_SOURCES)
+                partner = None
+                if source in SPEAKER_SOURCES:
+                    segs, partner = assign_speakers(source, f, wav, segs, spk)
                 transcript = " ".join(s["text"] for s in segs)
                 speech = sum(s["endMs"] - s["startMs"] for s in segs)
                 start, context = started_from_name(f), None
@@ -178,8 +221,12 @@ def main():
                 elif source == "discord-output":
                     context = "디스코드 음성 통화에서 내 PC로 들린 소리(내 목소리는 없음)"
                 summary = None
+                if partner:
+                    context = f"전화 통화 녹음. 상대: {partner}. '나'는 녹음한 사용자 본인"
                 if len(transcript) >= a.min_summary_chars and LLM_MODEL.exists():
-                    summary = llm.summarize(transcript, context)
+                    summary = llm.summarize(labeled(segs) if any(s["speaker"] for s in segs) else transcript, context)
+                if partner and summary:
+                    summary = f"통화 상대: {partner}\n{summary}"
                 body = {"device": device, "file": rel, "source": source, "startedAt": start.isoformat(), "endedAt": (start + dt.timedelta(milliseconds=dur)).isoformat(),
                         "asrModel": ASR_MODEL.stem.removeprefix("ggml-"), "llmModel": LLM_MODEL.stem if summary else None, "language": "ko",
                         "speechMs": speech, "transcript": transcript, "summary": summary, "segments": segs}
