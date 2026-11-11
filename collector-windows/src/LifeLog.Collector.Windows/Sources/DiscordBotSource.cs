@@ -1,4 +1,5 @@
 using System.Text.Json;
+using LifeLog.Core;
 using LifeLog.Collector.Windows.Sources.Recording;
 using NAudio.Dsp;
 using NetCord;
@@ -11,7 +12,7 @@ namespace LifeLog.Collector.Windows.Sources;
 /// 디스코드 봇 녹음(2026-11-11, 켰을 때만). HearingAid와 같은 봇이 대상 사용자(나)가 있는 음성 채널을 따라 들어가
 /// <b>말하는 사람별로</b> 오디오를 저장한다. 실시간 전사는 하지 않는다. 대상이 채널을 옮기면 따라가고 나가면 봇도 나간다.
 ///
-/// - 켜고 끄기: 플러그인 win-discord-bot 설정 enabled(데스크톱 설정 › 플러그인, 트레이 메뉴 "디스코드 봇 녹음", `secondbrain-collector discord-bot on|off`).
+/// - 켜고 끄기: 플러그인 win-discord-bot 설정 enabled(데스크톱 녹음 화면 봇 띠, 데스크톱 설정 › 플러그인, 트레이 메뉴 "디스코드 봇 녹음", `secondbrain-collector discord-bot on|off`).
 /// - 대상 사용자 ID는 설정 target_user_id, 봇 토큰은 비밀값 bot_token(DPAPI, 데스크톱 설정 화면 또는 `discord-token`). 토큰은 메모리에서만 쓴다.
 /// - 사람마다 파일: Opus(48kHz) → 16kHz 모노 → AAC 32kbps. 패킷이 5초 끊기면 그 사람의 파일을 닫고 다음 말부터 새 파일.
 ///   5초 안의 끊김은 무음으로 채워 파일 안 시각이 실제 시각과 맞는다. 30분이면 나눈다.
@@ -33,6 +34,16 @@ public sealed class DiscordBotSource : ISource
 
     /// <summary>트레이에 보여 줄 상태.</summary>
     public static string StatusText { get; private set; } = "꺼짐";
+
+    /// <summary>
+    /// 데스크톱 녹음 화면이 읽는 상태 파일(2026-11-12). %LOCALAPPDATA%\SecondBrain\collector\discord-bot-status.json.
+    /// 소스가 도는 동안 2초마다 쓴다(at이 10초 넘게 오래되면 데스크톱은 수집기가 상태를 내지 않는 것으로 본다).
+    /// { at, pid, enabled, state: off|starting|idle|recording|error, code(오류 때: no_token·no_target·no_credentials·start_failed·join_failed), message, guild, channel, members, in_call }
+    /// 토큰·사용자 ID는 넣지 않는다.
+    /// </summary>
+    public static string StatusPath => Path.Combine(LifeLog.Core.Config.Root, "collector", "discord-bot-status.json");
+
+    private string _state = "off", _code = "", _gName = "", _chName = "";
 
     private readonly Action<string> _log;
     private Action<Dictionary<string, object?>>? _emit;
@@ -63,6 +74,48 @@ public sealed class DiscordBotSource : ISource
     private void OnSettingsChanged(DiscordSettings s) => _ = ApplyAsync(s.BotEnabled);
 
     /// <summary>설정(다시 읽기로 새로 들어온 값)·비밀값 파일이 바뀌면 다시 적용한다. 끊긴 파일 닫기도 여기서.</summary>
+    private int _tick;
+
+    private void Set(string state, string code = "")
+    {
+        _state = state; _code = code;
+        if (state != "recording") _gName = _chName = "";
+        if (!_cts.IsCancellationRequested) WriteStatus();   // 끝나는 중(다시 읽기·종료)에는 쓰지 않는다: 새 소스가 곧 쓴다
+    }
+
+    /// <summary>음성 채널에 있는 사람 수(봇 빼고). 모르면 null.</summary>
+    private int? Members()
+    {
+        try
+        {
+            if (_client is not { } c || _guildId is not ulong g || _channelId is not ulong ch || !c.Cache.Guilds.TryGetValue(g, out var guild)) return null;
+            var me = c.Cache.User?.Id;
+            return guild.VoiceStates.Values.Count(v => v.ChannelId == ch && v.UserId != me);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>상태 파일을 쓴다(임시 파일 → 바꾸기). 실패는 무시(다음 차례에 다시).</summary>
+    private void WriteStatus()
+    {
+        var o = new Dictionary<string, object?>
+        {
+            ["at"] = DateTimeOffset.Now.ToString("o"), ["pid"] = Environment.ProcessId, ["enabled"] = _enabled,
+            ["state"] = _state, ["code"] = _code, ["message"] = StatusText,
+            ["guild"] = _gName, ["channel"] = _chName, ["members"] = _state == "recording" ? Members() : null,
+            ["in_call"] = DiscordCall.InCall,
+        };
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(StatusPath)!);
+            var tmp = StatusPath + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(o, new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+            File.Move(tmp, StatusPath, overwrite: true);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
     private async Task WatchAsync()
     {
         string? seen = null;
@@ -73,6 +126,7 @@ public sealed class DiscordBotSource : ISource
                 var t = DiscordSettings.Signature;
                 if (t != seen) { seen = t; await ApplyAsync(DiscordSettings.Load().BotEnabled); }
                 CloseIdle(DateTimeOffset.Now);
+                if (++_tick % 2 == 0 && !_cts.IsCancellationRequested) WriteStatus();
             }
             catch (Exception e) { _log($"[discord-bot] {e.Message}"); }
             try { await Task.Delay(1000, _cts.Token); } catch (OperationCanceledException) { }
@@ -88,14 +142,19 @@ public sealed class DiscordBotSource : ISource
             _enabled = enabled;
             if (enabled) await StartBotAsync(); else await StopBotAsync("꺼짐");
         }
-        catch (Exception e) { _log($"[discord-bot] {(enabled ? "시작" : "정지")} 실패: {e.Message}"); StatusText = "오류: " + e.Message; _client = null; }
+        catch (Exception e) { _log($"[discord-bot] {(enabled ? "시작" : "정지")} 실패: {e.Message}"); StatusText = "오류: " + e.Message; Set("error", "start_failed"); _client = null; }
         finally { _lock.Release(); }
     }
 
     private async Task StartBotAsync()
     {
         var s = DiscordSettings.Load();
-        if (!s.HasBotCredentials) { StatusText = "토큰·대상 사용자 없음(설정 › 플러그인)"; _log("[discord-bot] 봇 토큰이나 따라갈 사용자 ID가 없습니다. 데스크톱 설정 › 플러그인 › 디스코드 봇 녹음에서 넣으세요"); return; }
+        if (!s.HasBotCredentials)
+        {
+            var noToken = !SecretStore.Has(DiscordSettings.BotPlugin, DiscordSettings.TokenKey);
+            var noTarget = !ulong.TryParse(s.TargetUser, out _);
+            Set("error", noToken && noTarget ? "no_credentials" : noToken ? "no_token" : "no_target");
+            StatusText = "토큰·대상 사용자 없음(설정 › 플러그인)"; _log("[discord-bot] 봇 토큰이나 따라갈 사용자 ID가 없습니다. 데스크톱 설정 › 플러그인 › 디스코드 봇 녹음에서 넣으세요"); return; }
         var (token, target) = s.GetBotCredentials();
         _target = target;
         var c = new GatewayClient(new BotToken(token), new GatewayClientConfiguration { Intents = GatewayIntents.Guilds | GatewayIntents.GuildVoiceStates });
@@ -103,8 +162,10 @@ public sealed class DiscordBotSource : ISource
         c.VoiceStateUpdate += OnVoiceStateUpdate;
         c.GuildUserChunk += OnGuildUserChunk;
         _client = c;
+        Set("starting");
         await c.StartAsync();
         StatusText = "대기(대상이 음성 채널에 없음)";
+        Set("idle");
         _log("[discord-bot] 켬. 게이트웨이 연결");
     }
 
@@ -119,6 +180,7 @@ public sealed class DiscordBotSource : ISource
             _log("[discord-bot] 끔");
         }
         StatusText = status;
+        Set("off");
     }
 
     private async Task ScanAndJoinAsync()
@@ -149,7 +211,7 @@ public sealed class DiscordBotSource : ISource
             if (!_enabled || _client is not { } c) return;
             if (channelId is null)
             {
-                if (_guildId == guildId) { await LeaveAsync(); StatusText = "대기(대상이 음성 채널에 없음)"; _log("[discord-bot] 대상이 나가서 봇도 나감"); }
+                if (_guildId == guildId) { await LeaveAsync(); StatusText = "대기(대상이 음성 채널에 없음)"; Set("idle"); _log("[discord-bot] 대상이 나가서 봇도 나감"); }
                 return;
             }
             if (_guildId == guildId && _channelId == channelId) return;
@@ -161,9 +223,10 @@ public sealed class DiscordBotSource : ISource
             InVoice = true;
             var (gName, chName) = Names(guildId, channelId.Value);
             StatusText = $"녹음 중: {gName} / {chName}";
+            _gName = gName; _chName = chName; Set("recording");
             _log($"[discord-bot] 참가: {gName} / {chName}");
         }
-        catch (Exception e) { _log($"[discord-bot] 음성 채널 참가 실패: {e.Message}"); StatusText = "참가 실패: " + e.Message; }
+        catch (Exception e) { _log($"[discord-bot] 음성 채널 참가 실패: {e.Message}"); StatusText = "참가 실패: " + e.Message; Set("error", "join_failed"); }
         finally { _lock.Release(); }
     }
 

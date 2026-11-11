@@ -162,6 +162,18 @@ static class DiscordCli
         {
             var on = await CurrentSettingAsync(DiscordSettings.BotPlugin, "enabled");
             Console.WriteLine($"봇 녹음 {(on == "true" ? "켬" : "끔")}, 토큰 {(SecretStore.Has(DiscordSettings.BotPlugin, DiscordSettings.TokenKey) ? "있음" : "없음")}");
+            // 실행 중인 수집기가 2초마다 쓰는 상태(데스크톱 녹음 화면과 같은 것)
+            try
+            {
+                var f = new FileInfo(DiscordBotSource.StatusPath);
+                if (f.Exists && DateTime.Now - f.LastWriteTime < TimeSpan.FromSeconds(10))
+                {
+                    var st = JsonDocument.Parse(File.ReadAllText(f.FullName)).RootElement;
+                    Console.WriteLine($"수집기 상태: {st.GetProperty("state").GetString()} · {st.GetProperty("message").GetString()}");
+                }
+                else Console.WriteLine("수집기 상태: 없음(수집기가 꺼져 있거나 봇 플러그인이 꺼짐)");
+            }
+            catch (Exception e) when (e is IOException or JsonException or KeyNotFoundException) { }
             return 0;
         }
         await SetSettingAsync(DiscordSettings.BotPlugin, "enabled", JsonValue.Create(arg == "on"));
