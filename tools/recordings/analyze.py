@@ -374,7 +374,7 @@ def main():
     try:
         for i, b in enumerate(jobs, 1):
             t0 = time.time()
-            with tempfile.TemporaryDirectory() as tmp:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:   # 백신·색인기가 임시 파일을 잡고 있어도 멈추지 않게
                 body = analyze_bundle(b, Path(tmp), llm, spk, a.min_summary_chars)
             if not a.dry_run:
                 call("PUT", "/api/recordings/analysis", body)
