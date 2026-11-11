@@ -4,7 +4,8 @@ using NAudio.CoreAudioApi;
 namespace LifeLog.Collector.Windows.Sources;
 
 /// <summary>
-/// 노트북 마이크 상시 녹음(2026-11-11). 디스코드 통화와 상관없이 입력 장치를 WASAPI로 계속 듣다가 소리 있는 구간만 파일로 남긴다.
+/// 노트북 마이크 녹음(2026-11-11). <b>디스코드 통화 중일 때만</b>(<see cref="DiscordCall.Recording"/>, 봇이 녹음 중이면 쉼) 입력 장치를 WASAPI로 열어
+/// 소리 있는 구간만 파일로 남긴다. 통화 밖에서는 장치를 닫는다(노트북을 들고 다녀 강의실 소리가 잡히던 것을 막음). 통화가 끝나면 열린 파일을 바로 닫는다.
 /// 디스코드 출력 녹음(루프백, 상대 목소리)에는 내 목소리가 없어서, 내 목소리는 이 녹음이 기준이 된다(겹치는 폰 녹음은 분석에서 거른다).
 /// - 장치: 플러그인 win-laptop-mic 설정 input_device(ID 또는 이름 일부). 비면 Windows 기본 통신 입력 장치를 쓰고, 기본 장치가 바뀌면 다시 붙는다.
 /// - 구간 규칙·기록 형식은 discord_output·폰 녹음과 같다(<see cref="Segmenter"/>, <see cref="WasapiSegmentCapture"/>).
@@ -36,7 +37,9 @@ public sealed class LaptopMicSource : ISource
         string? lastError = null;
         while (!_cts.IsCancellationRequested)
         {
-            try { CaptureOnce(); lastError = null; }
+            // 디스코드 통화 중일 때만 장치를 연다(봇이 녹음 중이면 쉰다)
+            if (!DiscordCall.WaitForRecording(_cts.Token)) break;
+            try { CaptureOnce(); lastError = null; continue; }
             catch (Exception e)
             {
                 if (e.Message != lastError) _log($"[{Tag}] {e.Message}. 10초 뒤 다시 시도");
@@ -75,6 +78,7 @@ public sealed class LaptopMicSource : ISource
         var id = device.ID;
         WasapiSegmentCapture.Run(device, loopback: false, new Segmenter(Folder, Tag, _emit!, _log), Tag, _log, _cts.Token, () =>
         {
+            if (!DiscordCall.Recording) { _log($"[{Tag}] 녹음 멈춤({DiscordCall.Why}). 장치를 닫습니다"); return true; }
             if (LaptopMicSettings.Version != version)
             {
                 version = LaptopMicSettings.Version;
