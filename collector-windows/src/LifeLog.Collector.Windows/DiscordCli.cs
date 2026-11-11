@@ -125,6 +125,23 @@ static class DiscordCli
         return 0;
     }
 
+    /// <summary>디스코드 통화 감지 확인: N초 동안 2초마다 Discord 오디오 세션과 판정(통화 중/아님)을 찍는다.</summary>
+    public static int CallStatus(string[] args)
+    {
+        var secs = args.Length > 0 && int.TryParse(args[0], out var n) ? n : 10;
+        using var en = new MMDeviceEnumerator();
+        var end = Environment.TickCount64 + secs * 1000L;
+        do
+        {
+            var lines = new List<string>();
+            var (cap, ren) = DiscordCall.Probe(en, lines.Add);
+            Console.WriteLine($"{DateTime.Now:HH:mm:ss} 입력 {(cap ? "활성" : "-")}, 출력 {(ren ? "활성" : "-")} → {DiscordCall.Why}");
+            foreach (var l in lines) Console.WriteLine("    " + l);
+            Thread.Sleep(2000);
+        } while (Environment.TickCount64 < end);
+        return 0;
+    }
+
     public static async Task<int> Token()
     {
         if (Console.IsInputRedirected) throw new InvalidOperationException("터미널에서 직접 실행하세요(표준 입력 리디렉션은 받지 않습니다). 데스크톱 설정 › 플러그인에서도 넣을 수 있습니다");
