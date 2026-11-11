@@ -2,7 +2,7 @@
 
 전사했는데 말소리가 하나도 안 잡힌 묶음(whisper 환각 문장을 거른 뒤 글 0자)을 휴지통으로 옮긴다.
 - 휴지통: %USERPROFILE%\\SecondBrainRecordings\\_trash\\<출처>\\<날짜>\\<이름>.m4a (출처 폴더 밖이라 analyze.py scan·데스크톱 목록에 안 잡힘)
-- 목록: _trash\\trash.tsv (source·name·file·trashed_at·purge_after·reason·rule·bundle_start·bundle_files·start·end, 파일마다 한 줄)
+- 목록: _trash\\trash.tsv (source·name·file·trashed_at·purge_after·reason·rule·bundle_start·bundle_files·start·end·phone_original, 파일마다 한 줄. phone_original=1이면 영구 삭제 때 폰 원본도)
 - 묘비: <출처 폴더>\\deleted.tsv에 바로 적는다(가져오기가 다시 가져오지 않게). reason 열에 이유
 - 서버 분석(글 0자)·수집기 행·index.tsv 줄은 그대로 둔다. 7일 뒤 데스크톱 녹음 화면이 영구 삭제(서버 POST /api/recordings/delete·파일·
   index.tsv 줄·폰 원본)하고, 그 전에는 휴지통 목록에서 듣고 되살릴 수 있다(되살리기 = 파일을 제자리로·묘비 줄과 목록 줄 지움).
@@ -14,7 +14,7 @@ TRASH_DAYS = 7
 SOURCES = ("phone", "laptop-mic")   # 통화·디스코드 일반·디스코드 봇은 빼기로 함(2026-11-12 사용자 결정)
 REASON = "말소리 없음"
 RULE = "환각 거른 뒤 전사 글 0자(묶음 전체)"
-COLUMNS = ["source", "name", "file", "trashed_at", "purge_after", "reason", "rule", "bundle_start", "bundle_files", "start", "end"]
+COLUMNS = ["source", "name", "file", "trashed_at", "purge_after", "reason", "rule", "bundle_start", "bundle_files", "start", "end", "phone_original"]
 
 
 def is_silent(segments: list, transcript: str) -> bool:
@@ -65,7 +65,7 @@ def move_bundle(root: Path, source: str, paths: list, bundle_start: str, now: dt
         moved.append(rel)
     purge = now + dt.timedelta(days=days)
     _append(trash_dir(root) / "trash.tsv", COLUMNS,
-            [[source, Path(rel).name, rel, now.isoformat(), purge.isoformat(), reason, rule, bundle_start, len(rels), *(spans[k] if spans else ("", ""))]
+            [[source, Path(rel).name, rel, now.isoformat(), purge.isoformat(), reason, rule, bundle_start, len(rels), *(spans[k] if spans else ("", "")), 1 if source in ("phone", "call") else 0]
              for k, rel in enumerate(moved)])
     return moved
 

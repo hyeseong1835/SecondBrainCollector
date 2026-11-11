@@ -40,7 +40,7 @@ class TrashTests(unittest.TestCase):
         c = rows[1].split("\t")
         self.assertEqual(c[:3], ["phone", "20261111-090000-aaaa.m4a", "2026-11-11/20261111-090000-aaaa.m4a"])
         self.assertEqual(c[4], "2026-11-19T09:30:00+09:00")   # 7일 뒤
-        self.assertEqual(c[8:], ["2", "s1", "e1"])
+        self.assertEqual(c[8:], ["2", "s1", "e1", "1"])   # 폰 원본도(2026-11-12 사용자 결정)
         self.assertEqual(T.listed(self.root), {("phone", "20261111-090000-aaaa.m4a"), ("phone", "20261111-090040-bbbb.m4a")})
 
     def test_kept(self):
