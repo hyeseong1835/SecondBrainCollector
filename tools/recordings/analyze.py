@@ -7,6 +7,7 @@
   python analyze.py --source phone --limit 2 --dry-run
   python analyze.py --redo          # 이미 분석한 것도 다시
   python analyze.py --source phone --pick 20261111-140200.m4a   # 그 파일이 든 묶음 하나(이미 분석했어도 다시)
+  python analyze.py --call 20261111-224007-ab12cd34.m4a   # 그 파일이 든 디스코드 통화(디스코드 일반 녹음+노트북 마이크)의 미전사 묶음 전부(--redo면 전부)
   python analyze.py --progress-json # 사람이 읽는 줄 사이에 "@@progress {json}" 줄(데스크톱 녹음 화면이 읽음)
 
 동시 실행 막기(runlock.py): %LOCALAPPDATA%/SecondBrain/analysis/analyze.lock + 명령줄에 analyze.py가 든 다른 python 프로세스. 이미 돌고 있으면 종료 코드 3.
@@ -15,6 +16,8 @@
 묶음(2026-11-11, bundles.py): 같은 출처에서 앞 파일 끝~다음 파일 시작이 간격 기준(API GET /api/recordings/bundle-rule, 기본 60초) 이하면 한 묶음,
 최대 30분(넘으면 가장 긴 간격에서 나눔), 통화는 파일 하나가 한 묶음. 전사는 파일마다 해서 묶음 시각으로 옮기고, 화자 구분(간격을 무음으로 채워 이어 붙인 오디오)과 요약은 묶음 전체로 한 번에 하며,
 결과는 묶음 한 줄(file = 첫 파일, files = 든 파일·오프셋, 구간 시각은 묶음 시작 기준)로 올린다.
+디스코드 통화(2026-11-12, bundles.make_calls): 규칙의 callSources 묶음들이 간격 기준 안에 이어지면 한 통화. --call은 통화에 든 묶음을 출처별 기존 전사로 차례로 처리한다
+(결과는 출처별 묶음 그대로 올리고, 합쳐 보이는 것은 데스크톱 녹음 화면).
 
 녹음 위치: %USERPROFILE%/SecondBrainRecordings/<원천>/<날짜>/<이름>.m4a
   phone/           폰 녹음(pull-recordings.ps1이 가져옴). 기기 phone
@@ -266,7 +269,8 @@ def scan(folder: str) -> list:
 def bundle_rule(get) -> dict:
     try:
         r = get("/api/recordings/bundle-rule")
-        return {"gapSec": int(r["gapSec"]), "maxSec": int(r["maxSec"]), "singleSources": list(r.get("singleSources") or [])}
+        return {"gapSec": int(r["gapSec"]), "maxSec": int(r["maxSec"]), "singleSources": list(r.get("singleSources") or []),
+                "callSources": list(r.get("callSources") or B.DEFAULT_RULE["callSources"])}
     except Exception as e:
         print("  묶음 규칙을 API에서 못 받아 기본값을 쓴다:", e)
         return dict(B.DEFAULT_RULE)
@@ -370,6 +374,7 @@ def main():
     ap.add_argument("--min-summary-chars", type=int, default=60)
     ap.add_argument("--source", choices=list(SOURCES), help="이 원천 폴더만(예: phone)")
     ap.add_argument("--pick", help="--source 안에서 이 파일 이름이 든 묶음 하나만(이미 분석했어도 다시)")
+    ap.add_argument("--call", help="이 파일 이름이 든 디스코드 통화(callSources 묶음들)의 미전사 묶음 전부(--redo면 전부)")
     ap.add_argument("--progress-json", action="store_true", help='진행을 "@@progress {json}" 줄로도 낸다')
     ap.add_argument("--no-auto-remove", action="store_true", help="말소리 없는 묶음을 휴지통으로 옮기지 않는다")
     ap.add_argument("--sweep-silent", action="store_true", help="전사하지 않고, 이미 전사된 묶음 중 말소리 없는 것을 휴지통으로(--dry-run이면 목록만)")
@@ -381,6 +386,7 @@ def main():
     except (AttributeError, ValueError):
         pass
     if a.pick and not a.source: ap.error("--pick에는 --source가 필요합니다")
+    if a.call and (a.pick or a.file or a.source): ap.error("--call은 --pick·--file·--source와 함께 쓸 수 없습니다")
     if not a.plan:
         busy = runlock.acquire(sys.argv[1:])
         if busy:
@@ -446,6 +452,8 @@ def run(a):
     now = epoch_ms(dt.datetime.now().astimezone())
     print(f"묶음 규칙: 간격 {rule['gapSec']}초 이하 · 최대 {rule['maxSec'] // 60}분 · 묶지 않음 {', '.join(rule['singleSources']) or '-'}")
 
+    if a.call:
+        return run_jobs(a, call, *call_jobs(a, get, rule, now))
     target = Path(a.file).resolve() if a.file else None
     folders = [source_of(target)] if target else [x for x in SOURCES if not a.source or x == a.source]
     jobs, n_done, n_progress = [], 0, 0
@@ -474,6 +482,38 @@ def run(a):
     if (target or a.pick) and not jobs:
         progress("missing", file=a.file or a.pick, source=a.source)
         print("그 파일이 든 묶음을 찾지 못했습니다(이 PC의 녹음 폴더에 파일이 없음):", a.file or f"{a.source}/{a.pick}")
+    return run_jobs(a, call, jobs, n_done, n_progress)
+
+
+def call_jobs(a, get, rule, now):
+    """--call: 그 파일이 든 디스코드 통화의 묶음들(출처별 묶음 그대로). 진행 중인 묶음이 있으면 통화째 거절(종료 코드 4)."""
+    bundles = []
+    for folder in rule["callSources"]:
+        if folder in SOURCES and (ROOT / folder).exists(): bundles += B.make_bundles(scan(folder), rule)
+    found = next((c for c in B.make_calls(bundles, rule) if any(Path(it.rel).name == a.call for b in c for it in b.items)), None)
+    if found is None:
+        # 통화가 아니어도(한 출처뿐) 그 파일이 든 묶음 하나는 처리한다
+        found = [b for b in bundles if any(Path(it.rel).name == a.call for it in b.items)]
+    if not found:
+        progress("missing", file=a.call, source="call")
+        print("그 파일이 든 디스코드 통화를 찾지 못했습니다(이 PC의 녹음 폴더에 파일이 없음):", a.call)
+        return [], 0, 0
+    print(f"디스코드 통화 {hms(min(b.start for b in found))} ~ {hms(max(b.end for b in found))[6:]}: 묶음 {len(found)}개("
+          + ", ".join(f"{s} {sum(1 for b in found if b.source == s)}" for s in rule["callSources"]) + ")")
+    late = [b for b in found if B.in_progress(b, now, rule)]
+    if late:
+        progress("refused", reason="in-progress", **bundle_info(late[0]))
+        print(f"아직 녹음이 이어질 수 있는 통화라 전사하지 않습니다(마지막 파일 뒤 {rule['gapSec']}초가 지나지 않음).")
+        sys.exit(4)
+    done = set()
+    if not a.redo:
+        for dev in sorted({SOURCES[b.source] for b in found}):
+            done |= set(get("/api/recordings/analyzed?device=" + urllib.parse.quote(dev)) or [])
+    jobs = [b for b in found if a.redo or not all(it.rel in done for it in b.items)]
+    return jobs, len(found) - len(jobs), 0
+
+
+def run_jobs(a, call, jobs, n_done, n_progress):
     print(("전사만 합니다(요약 안 함). " if a.stage == "transcribe" else "") + f"분석할 묶음 {len(jobs)}개(파일 {sum(len(b.items) for b in jobs)}개) · 이미 분석 {n_done} · 진행 중이라 건너뜀 {n_progress}")
     if not a.plan:
         progress("plan", total=len(jobs), files=sum(len(b.items) for b in jobs), done=n_done, inProgress=n_progress, dryRun=a.dry_run, stage=a.stage)
