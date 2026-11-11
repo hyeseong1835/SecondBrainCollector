@@ -8,8 +8,11 @@
   python analyze.py --redo          # 이미 분석한 것도 다시
   python analyze.py --source phone --pick 20261111-140200.m4a   # 그 파일이 든 묶음 하나(이미 분석했어도 다시)
   python analyze.py --progress-json # 사람이 읽는 줄 사이에 "@@progress {json}" 줄(데스크톱 녹음 화면이 읽음)
+  python analyze.py --source phone --pick X.m4a --only-new   # 이미 전사된 묶음이면 건너뜀(데스크톱 전사 대기열이 씀)
 
 동시 실행 막기(runlock.py): %LOCALAPPDATA%/SecondBrain/analysis/analyze.lock + 명령줄에 analyze.py가 든 다른 python 프로세스. 이미 돌고 있으면 종료 코드 3.
+전사 대기열(2026-11-12): 데스크톱 녹음 화면이 %LOCALAPPDATA%/SecondBrain/analysis/queue.json에 쌓아 두고 차례로 이 스크립트를 띄운다.
+  묶음을 정하면 잠금 파일에 "plan"(이번 실행이 처리할 묶음 키 "<출처>/<첫 파일 이름>" 목록)을 적어, 대기열이 같은 묶음을 두 번 넣지 않게 한다.
 진행 중인 묶음(마지막 파일 뒤 간격이 안 지남)은 --file·--pick으로 골라도 분석하지 않는다(종료 코드 4).
 
 묶음(2026-11-11, bundles.py): 같은 출처에서 앞 파일 끝~다음 파일 시작이 간격 기준(API GET /api/recordings/bundle-rule, 기본 60초) 이하면 한 묶음,
@@ -359,6 +362,11 @@ def bundle_info(b: "B.Bundle") -> dict:
     return {"source": b.source, "first": Path(b.items[0].rel).name, "start": iso(b.start), "end": iso(b.end), "files": len(b.items)}
 
 
+def bundle_key(b: "B.Bundle") -> str:
+    """대기열·잠금 파일 plan의 묶음 키: <출처>/<첫 파일 이름>(데스크톱 TranscribeQueue.BundleKey와 같음)"""
+    return f"{b.source}/{Path(b.items[0].rel).name}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", help="이 파일이 든 묶음 하나만")
@@ -371,6 +379,7 @@ def main():
     ap.add_argument("--source", choices=list(SOURCES), help="이 원천 폴더만(예: phone)")
     ap.add_argument("--pick", help="--source 안에서 이 파일 이름이 든 묶음 하나만(이미 분석했어도 다시)")
     ap.add_argument("--progress-json", action="store_true", help='진행을 "@@progress {json}" 줄로도 낸다')
+    ap.add_argument("--only-new", action="store_true", help="--pick·--file로 고른 묶음이 이미 전사돼 있으면 건너뛴다(대기열에서 미전사로 넣은 것)")
     ap.add_argument("--no-auto-remove", action="store_true", help="말소리 없는 묶음을 휴지통으로 옮기지 않는다")
     ap.add_argument("--sweep-silent", action="store_true", help="전사하지 않고, 이미 전사된 묶음 중 말소리 없는 것을 휴지통으로(--dry-run이면 목록만)")
     a = ap.parse_args()
@@ -460,6 +469,12 @@ def run(a):
                     progress("refused", reason="in-progress", **bundle_info(b))
                     print(f"진행 중인 묶음이라 분석하지 않습니다({hms(b.start)} ~ {hms(b.end)[6:]}, 마지막 파일 뒤 {rule['gapSec']}초가 지나지 않음).")
                     sys.exit(4)
+                if a.only_new and not a.redo:
+                    done = set(get("/api/recordings/analyzed?device=" + urllib.parse.quote(SOURCES[folder])) or [])
+                    if all(it.rel in done for it in b.items):
+                        progress("skipped", reason="already", **bundle_info(b))
+                        print("이미 전사된 묶음이라 건너뜁니다:", bundle_key(b)); n_done += 1
+                        continue
                 jobs.append(b)
             continue
         done = set() if a.redo else set(get("/api/recordings/analyzed?device=" + urllib.parse.quote(SOURCES[folder])) or [])
@@ -471,11 +486,12 @@ def run(a):
             elif state == "분석됨": n_done += 1
             else: jobs.append(b)
     if a.limit: jobs = jobs[:a.limit]
-    if (target or a.pick) and not jobs:
+    if (target or a.pick) and not jobs and not n_done:
         progress("missing", file=a.file or a.pick, source=a.source)
         print("그 파일이 든 묶음을 찾지 못했습니다(이 PC의 녹음 폴더에 파일이 없음):", a.file or f"{a.source}/{a.pick}")
     print(("전사만 합니다(요약 안 함). " if a.stage == "transcribe" else "") + f"분석할 묶음 {len(jobs)}개(파일 {sum(len(b.items) for b in jobs)}개) · 이미 분석 {n_done} · 진행 중이라 건너뜀 {n_progress}")
     if not a.plan:
+        runlock.set_plan([bundle_key(b) for b in jobs])
         progress("plan", total=len(jobs), files=sum(len(b.items) for b in jobs), done=n_done, inProgress=n_progress, dryRun=a.dry_run, stage=a.stage)
     if a.plan or not jobs:
         if not a.plan: progress("end", analyzed=0, total=0)

@@ -4,6 +4,7 @@
   죽은 PID(취소·강제 종료로 남은 파일)는 낡은 잠금으로 보고 덮어쓴다.
 - 잠금을 모르는 옛 analyze.py(앱 밖에서 이미 돌던 것)도 막도록, 명령줄에 analyze.py가 든 python 프로세스를 함께 본다(자기와 조상 제외).
 - --plan은 잠그지 않는다(분석하지 않으므로).
+- 묶음을 정하면 "plan"(처리할 묶음 키 목록)을 더 적는다(set_plan). 데스크톱 전사 대기열이 같은 묶음을 다시 넣지 않게 읽는다.
 - 두 실행이 겹치면 llama-server 포트(8089)·GPU를 같이 써서 한쪽이 요약 중에 끊긴다(2026-11-11 실제로 앱 밖 전체 실행이 멈춤). 예외 옵션은 두지 않는다.
 """
 import ctypes, datetime as dt, json, os, subprocess, sys
@@ -80,6 +81,15 @@ def acquire(args: list) -> dict | None:
     LOCK.write_text(json.dumps({"pid": os.getpid(), "started": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "args": args},
                                ensure_ascii=False), encoding="utf-8")
     return None
+
+
+def set_plan(keys: list):
+    """이번 실행이 처리할 묶음 키("<출처>/<첫 파일 이름>")를 잠금 파일에 더한다. 데스크톱 전사 대기열이 중복을 거를 때 읽는다(2026-11-12)."""
+    held = read()
+    if not held or int(held.get("pid") or 0) != os.getpid(): return
+    held["plan"] = keys
+    try: LOCK.write_text(json.dumps(held, ensure_ascii=False), encoding="utf-8")
+    except OSError: pass
 
 
 def release():

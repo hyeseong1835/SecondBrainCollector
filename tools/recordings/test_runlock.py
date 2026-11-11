@@ -27,6 +27,20 @@ class RunLockTests(unittest.TestCase):
         self.assertTrue(L.pid_alive(os.getpid()))
         self.assertFalse(L.pid_alive(0))
 
+    def test_set_plan_only_own_lock(self):
+        import tempfile, json
+        with tempfile.TemporaryDirectory() as d:
+            old, L.LOCK = L.LOCK, Path(d) / "analyze.lock"
+            try:
+                L.LOCK.write_text(json.dumps({"pid": os.getpid() + 1}), encoding="utf-8")
+                L.set_plan(["phone/a.m4a"])
+                self.assertNotIn("plan", L.read())          # 남의 잠금은 안 건드림
+                L.LOCK.write_text(json.dumps({"pid": os.getpid(), "args": []}), encoding="utf-8")
+                L.set_plan(["phone/a.m4a", "call/b.m4a"])
+                self.assertEqual(L.read()["plan"], ["phone/a.m4a", "call/b.m4a"])
+            finally:
+                L.LOCK = old
+
 
 if __name__ == "__main__":
     unittest.main()
