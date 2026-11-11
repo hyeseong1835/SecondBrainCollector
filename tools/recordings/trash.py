@@ -2,7 +2,7 @@
 
 전사했는데 말소리가 하나도 안 잡힌 묶음(whisper 환각 문장을 거른 뒤 글 0자)을 휴지통으로 옮긴다.
 - 휴지통: %USERPROFILE%\\SecondBrainRecordings\\_trash\\<출처>\\<날짜>\\<이름>.m4a (출처 폴더 밖이라 analyze.py scan·데스크톱 목록에 안 잡힘)
-- 목록: _trash\\trash.tsv (source·name·file·trashed_at·purge_after·reason·rule·bundle_start·bundle_files)
+- 목록: _trash\\trash.tsv (source·name·file·trashed_at·purge_after·reason·rule·bundle_start·bundle_files·start·end, 파일마다 한 줄)
 - 묘비: <출처 폴더>\\deleted.tsv에 바로 적는다(가져오기가 다시 가져오지 않게). reason 열에 이유
 - 서버 분석(글 0자)·수집기 행·index.tsv 줄은 그대로 둔다. 7일 뒤 데스크톱 녹음 화면이 영구 삭제(서버 POST /api/recordings/delete·파일·
   index.tsv 줄·폰 원본)하고, 그 전에는 휴지통 목록에서 듣고 되살릴 수 있다(되살리기 = 파일을 제자리로·묘비 줄과 목록 줄 지움).
@@ -14,7 +14,7 @@ TRASH_DAYS = 7
 SOURCES = ("phone", "laptop-mic")   # 통화·디스코드 일반·디스코드 봇은 빼기로 함(2026-11-12 사용자 결정)
 REASON = "말소리 없음"
 RULE = "환각 거른 뒤 전사 글 0자(묶음 전체)"
-COLUMNS = ["source", "name", "file", "trashed_at", "purge_after", "reason", "rule", "bundle_start", "bundle_files"]
+COLUMNS = ["source", "name", "file", "trashed_at", "purge_after", "reason", "rule", "bundle_start", "bundle_files", "start", "end"]
 
 
 def is_silent(segments: list, transcript: str) -> bool:
@@ -43,9 +43,9 @@ def tombstone(root: Path, source: str, files: list, now: dt.datetime, reason: st
 
 
 def move_bundle(root: Path, source: str, paths: list, bundle_start: str, now: dt.datetime | None = None,
-                reason: str = REASON, rule: str = RULE, days: int = TRASH_DAYS) -> list:
+                reason: str = REASON, rule: str = RULE, days: int = TRASH_DAYS, spans: list | None = None) -> list:
     """묶음의 파일들(출처 폴더 안의 실제 경로)을 휴지통으로. 묘비를 먼저 적는다(도중에 멈춰도 다시 가져오지 않게).
-    옆 파일(.json 등 이름이 같은 것)도 같이 옮긴다. → 옮긴 파일의 출처 폴더 기준 경로들"""
+    spans는 파일마다 (시작, 끝) ISO 시각(휴지통에서 듣기용). 옆 파일(.json 등 이름이 같은 것)도 같이 옮긴다. → 옮긴 파일의 출처 폴더 기준 경로들"""
     now = now or dt.datetime.now().astimezone().replace(microsecond=0)
     base = root / source
     rels = []
@@ -65,7 +65,8 @@ def move_bundle(root: Path, source: str, paths: list, bundle_start: str, now: dt
         moved.append(rel)
     purge = now + dt.timedelta(days=days)
     _append(trash_dir(root) / "trash.tsv", COLUMNS,
-            [[source, Path(rel).name, rel, now.isoformat(), purge.isoformat(), reason, rule, bundle_start, len(rels)] for rel in moved])
+            [[source, Path(rel).name, rel, now.isoformat(), purge.isoformat(), reason, rule, bundle_start, len(rels), *(spans[k] if spans else ("", ""))]
+             for k, rel in enumerate(moved)])
     return moved
 
 

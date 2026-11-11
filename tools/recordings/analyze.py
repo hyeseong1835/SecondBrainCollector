@@ -428,7 +428,7 @@ def sweep_silent(a, call):
         if a.dry_run:
             print(f"  후보 {src} {when}  파일 {len(paths)}개")
         else:
-            T.move_bundle(ROOT, src, paths, r["startedAt"])
+            T.move_bundle(ROOT, src, paths, r["startedAt"], spans=[(f.get("startedAt", ""), f.get("endedAt", "")) for f in files])
             print(f"  휴지통으로 {src} {when}  파일 {len(paths)}개")
             progress("trashed", source=src, start=r["startedAt"], files=len(paths))
     print(f"말소리 없는 묶음 {n}개(파일 {n_files}개) " + ("— dry-run이라 옮기지 않음" if a.dry_run else f"휴지통으로 옮김({T.TRASH_DAYS}일 뒤 녹음 화면이 영구 삭제)"))
@@ -500,7 +500,7 @@ def run(a):
                 if a.dry_run:
                     print(f"    말소리 없음 → 휴지통 후보(dry-run이라 옮기지 않음)")
                 else:
-                    moved = T.move_bundle(ROOT, b.source, [it.path for it in b.items], iso(b.start))
+                    moved = T.move_bundle(ROOT, b.source, [it.path for it in b.items], iso(b.start), spans=[(iso(it.start), iso(it.end)) for it in b.items])
                     print(f"    말소리 없음 → 휴지통으로 파일 {len(moved)}개({T.TRASH_DAYS}일 뒤 영구 삭제, 녹음 화면에서 되살리기)")
                     progress("trashed", source=b.source, start=iso(b.start), files=len(moved))
             if a.dry_run:
