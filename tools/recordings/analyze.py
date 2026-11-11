@@ -1,6 +1,7 @@
 """녹음 2차 분석(2026-11-11): 노트북(eGPU RX 6600, Vulkan)에서 전사·요약하고 결과만 SecondBrain API에 올린다. 원본 오디오는 올리지 않는다.
 
-  python analyze.py                 # 아직 분석하지 않은 묶음 전부(진행 중인 묶음은 건너뜀)
+  python analyze.py                 # 아직 전사하지 않은 묶음 전부를 전사(+화자 구분)만(진행 중인 묶음은 건너뜀)
+  python analyze.py --stage all     # 전사하고 요약까지(요약은 일단 쓰지 않음, 2026-11-11 사용자 결정)
   python analyze.py --plan          # 묶음과 상태(분석됨·분석할 것·진행 중)만 보기
   python analyze.py --file X.m4a --dry-run   # 그 파일이 든 묶음 하나 시험(올리지 않음)
   python analyze.py --source phone --limit 2 --dry-run
@@ -20,10 +21,12 @@
   discord-output/  디스코드 출력 장치 녹음(데스크톱 수집기). 기기 laptop
   discord-bot/     디스코드 봇 녹음(데스크톱 수집기, 사람별 파일 + 옆 .json에 화자). 기기 laptop. 세그먼트 speaker = 디스코드 표시 이름
   call/            삼성 통화 녹음(pull-call-recordings.ps1이 가져옴). 기기 phone, file은 "call/<날짜>/통화 <상대>_<YYMMDD>_<HHMMSS>.m4a"
+  laptop-mic/      노트북 마이크 상시 녹음(데스크톱 수집기). 기기 laptop, file은 "laptop-mic/<날짜>/<이름>.m4a", 구간 화자는 '나'
 화자 구분: speakers.py(sherpa-onnx). phone·call만. '나' 기준은 python speakers.py enroll로 먼저 만든다(없으면 화자1·화자2…만)
 도구·모델: %LOCALAPPDATA%/SecondBrain/analysis (whisper.cpp Vulkan 빌드, ffmpeg, llama.cpp Vulkan, 모델들)
   전사 batisay-ko-turbo q8_0 + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
-API: %LOCALAPPDATA%/SecondBrain/api.json의 url·key(훅 키)
+API: %LOCALAPPDATA%/SecondBrain/api.json의 url·key(훅 키). 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 있으면 그것(시험 인스턴스)
+단계(--stage, 2026-11-11): transcribe(기본) = 전사·화자 구분만 올린다(요약 비움). all = 예전처럼 전사하고 바로 요약
 """
 import argparse, datetime as dt, json, os, re, subprocess, sys, tempfile, time, urllib.parse, urllib.request
 from pathlib import Path
@@ -40,16 +43,19 @@ LLM_MODEL = A / "models" / "EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf"
 LLAMA = A / "llama" / "llama-server.exe"
 FFMPEG = next((A / "ffmpeg").rglob("ffmpeg.exe"), None)
 ROOT = Path(os.environ["USERPROFILE"]) / "SecondBrainRecordings"
-SOURCES = {"phone": "phone", "discord-output": "laptop", "discord-bot": "laptop", "call": "phone"}   # 폴더 → 기기
-REL_PREFIX = {"call": "call/"}   # 같은 기기(phone)의 폰 녹음과 file 이름이 겹치지 않게
+SOURCES = {"phone": "phone", "discord-output": "laptop", "discord-bot": "laptop", "call": "phone", "laptop-mic": "laptop"}   # 폴더 → 기기
+REL_PREFIX = {"call": "call/", "laptop-mic": "laptop-mic/"}   # 같은 기기의 다른 출처와 file 이름이 겹치지 않게
+ME_SOURCES = ("laptop-mic",)   # 구간 화자를 '나'로 채우는 원천(노트북 마이크는 주로 내 목소리)
 LLM_PORT = 8089
 # whisper가 말소리 없는 곳에서 지어내는 흔한 문장(유튜브 자막 학습 흔적)
 HALLUCINATIONS = re.compile(r"^(시청해\s*주셔서\s*감사합니다|구독과\s*좋아요|MBC\s*뉴스|자막\s*제공|[.\s,!?♪]*)$")
 
 
 def api():
-    cfg = json.load(open(LOCAL / "SecondBrain" / "api.json", encoding="utf-8"))
-    base, key = cfg["url"].rstrip("/"), cfg["key"]
+    # 시험 인스턴스: 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 api.json보다 앞선다(데스크톱 Settings와 같은 이름. 데스크톱이 띄우면 물려받음)
+    env_url, env_key = os.environ.get("SECONDBRAIN_API"), os.environ.get("SECONDBRAIN_API_KEY")
+    cfg = {} if env_url and env_key else json.load(open(LOCAL / "SecondBrain" / "api.json", encoding="utf-8"))
+    base, key = (env_url or cfg["url"]).rstrip("/"), env_key or cfg["key"]
 
     def call(method, path, body=None):
         data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -292,8 +298,8 @@ def join_wavs(b: "B.Bundle", wavs: list, dst: Path) -> Path:
     return dst
 
 
-def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm", spk: dict, min_summary_chars: int):
-    """묶음 하나를 전사·화자 구분·요약. → API 본문(segments 포함)
+def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_summary_chars: int):
+    """묶음 하나를 전사·화자 구분(llm이 있으면 요약까지). → API 본문(segments 포함)
     전사는 파일마다 하고 시각에 오프셋을 더한다: 무음을 채워 이어 붙인 긴 wav를 whisper.cpp VAD로 돌리면 구간 시각이 수백 초씩 어긋났다(2026-11-11 실측).
     녹음은 5초 무음 뒤에만 파일을 끊으므로 경계에서 말이 잘리는 일은 드물다. 화자 구분(sherpa)과 요약은 묶음 전체로 한 번에."""
     source, first = b.source, b.items[0]
@@ -309,6 +315,7 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm", spk: dict, min_summary_
         for s in part:
             s["startMs"] += off; s["endMs"] += off
             if source == "discord-bot": s["speaker"] = it.speaker
+            elif source in ME_SOURCES: s["speaker"] = "나"
         segs += part
     segs.sort(key=lambda s: (s["startMs"], s["endMs"]))
     if words_mode:
@@ -322,12 +329,14 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm", spk: dict, min_summary_
         context = discord_bot_context([discord_bot_meta(it.path) for it in b.items])
     elif source == "discord-output":
         context = "디스코드 음성 통화에서 내 PC로 들린 소리(내 목소리는 없음)"
+    elif source == "laptop-mic":
+        context = "노트북 마이크로 녹음한 소리(주로 내 목소리)"
     if partner:
         context = f"전화 통화 녹음. 상대: {partner}. '나'는 녹음한 사용자 본인"
     if len(b.items) > 1:
         context = (context + ". " if context else "") + f"녹음 파일 {len(b.items)}개를 시간순으로 이어 붙인 것"
     summary = None
-    if len(transcript) >= min_summary_chars and LLM_MODEL.exists():
+    if llm is not None and len(transcript) >= min_summary_chars and LLM_MODEL.exists():
         progress("step", stage="summary")
         summary = llm.summarize(labeled(segs) if any(s["speaker"] for s in segs) else transcript, context)
     if partner and summary:
@@ -358,6 +367,7 @@ def main():
     ap.add_argument("--plan", action="store_true", help="묶음과 상태만 보이고 분석하지 않는다")
     ap.add_argument("--redo", action="store_true", help="이미 분석한 묶음도 다시")
     ap.add_argument("--limit", type=int, help="묶음 최대 N개만")
+    ap.add_argument("--stage", choices=("transcribe", "all"), default="transcribe", help="transcribe = 전사·화자 구분만(기본), all = 요약까지")
     ap.add_argument("--min-summary-chars", type=int, default=60)
     ap.add_argument("--source", choices=list(SOURCES), help="이 원천 폴더만(예: phone)")
     ap.add_argument("--pick", help="--source 안에서 이 파일 이름이 든 묶음 하나만(이미 분석했어도 다시)")
@@ -424,14 +434,14 @@ def run(a):
     if (target or a.pick) and not jobs:
         progress("missing", file=a.file or a.pick, source=a.source)
         print("그 파일이 든 묶음을 찾지 못했습니다(이 PC의 녹음 폴더에 파일이 없음):", a.file or f"{a.source}/{a.pick}")
-    print(f"분석할 묶음 {len(jobs)}개(파일 {sum(len(b.items) for b in jobs)}개) · 이미 분석 {n_done} · 진행 중이라 건너뜀 {n_progress}")
+    print(("전사만 합니다(요약 안 함). " if a.stage == "transcribe" else "") + f"분석할 묶음 {len(jobs)}개(파일 {sum(len(b.items) for b in jobs)}개) · 이미 분석 {n_done} · 진행 중이라 건너뜀 {n_progress}")
     if not a.plan:
-        progress("plan", total=len(jobs), files=sum(len(b.items) for b in jobs), done=n_done, inProgress=n_progress, dryRun=a.dry_run)
+        progress("plan", total=len(jobs), files=sum(len(b.items) for b in jobs), done=n_done, inProgress=n_progress, dryRun=a.dry_run, stage=a.stage)
     if a.plan or not jobs:
         if not a.plan: progress("end", analyzed=0, total=0)
         return
 
-    llm = Llm()
+    llm = Llm() if a.stage == "all" else None
     spk = {}
     try:
         for i, b in enumerate(jobs, 1):
@@ -451,7 +461,7 @@ def run(a):
                 if body["summary"]: print("  요약:", body["summary"])
         progress("end", analyzed=len(jobs), total=len(jobs))
     finally:
-        llm.close()
+        if llm: llm.close()
 
 if __name__ == "__main__":
     main()
