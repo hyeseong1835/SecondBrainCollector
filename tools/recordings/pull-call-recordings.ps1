@@ -5,6 +5,7 @@
   - 노트북: <Dest>/call/<YYYY-MM-DD>/<원래 이름>.m4a. 이미 있고 크기가 같으면 건너뜀
   - 가져온 뒤 폰과 노트북의 sha256을 견주고, 같을 때만 제자리 이름으로 바꾼다. 폰 사본은 지우지 않는다
   - <Dest>/call/index.tsv에 한 줄씩(파일, 바이트, sha256, 가져온 시각, 상대, 번호, 통화 시작)
+  - 녹음 화면에서 지운 파일(<Dest>/call/deleted.tsv, 묘비)은 건너뜀(result reason deleted)
   - 사본 위치는 PUT /api/recordings/files (device phone, file "call/<날짜>/<이름>")
 -ProgressJson·종료 코드는 pull-recordings.ps1과 같다(0 성공, 1 실패한 파일 있음, 2 연결 안 됨, 3 이미 가져오는 중).
 #>
@@ -34,9 +35,11 @@ $files = @($list | Where-Object { $_ -match '^\d+ \./' } | ForEach-Object { $p =
 Write-Host "폰 통화 녹음 $($files.Count)개"
 Progress 'plan' @{ kind = 'call'; total = $files.Count; device = $env:ANDROID_SERIAL }
 
+$deleted = Get-Deleted $localRoot
 $pulled = 0; $skipped = 0; $bad = 0; $i = 0
 foreach ($f in $files) {
     $i++
+    if ($deleted.Contains($f.Name)) { $skipped++; Progress 'result' @{ i = $i; status = 'skipped'; name = $f.Name; reason = 'deleted' }; continue }
     $info = ParseName $f.Name
     if (-not $info) { Write-Host "  이름 형식 모름(건너뜀): $($f.Name)" -ForegroundColor Yellow; $skipped++; Progress 'result' @{ i = $i; status = 'skipped'; name = $f.Name; reason = 'name' }; continue }
     $rel = "call/$($info.Date)/$($f.Name)"

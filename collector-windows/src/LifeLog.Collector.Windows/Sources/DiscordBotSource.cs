@@ -28,6 +28,9 @@ public sealed class DiscordBotSource : ISource
     static readonly TimeSpan Gap = TimeSpan.FromSeconds(5);
     static readonly TimeSpan MaxLen = TimeSpan.FromMinutes(30);
 
+    /// <summary>봇이 음성 채널에 들어가 녹음 중인가. 이때는 discord_output·laptop_mic이 멈춘다(<see cref="DiscordCall.Recording"/>).</summary>
+    public static volatile bool InVoice;
+
     /// <summary>트레이에 보여 줄 상태.</summary>
     public static string StatusText { get; private set; } = "꺼짐";
 
@@ -155,6 +158,7 @@ public sealed class DiscordBotSource : ISource
             vc.VoiceReceive += OnVoiceReceive;
             await vc.StartAsync();
             _voice = vc; _guildId = guildId; _channelId = channelId;
+            InVoice = true;
             var (gName, chName) = Names(guildId, channelId.Value);
             StatusText = $"녹음 중: {gName} / {chName}";
             _log($"[discord-bot] 참가: {gName} / {chName}");
@@ -168,6 +172,7 @@ public sealed class DiscordBotSource : ISource
         var vc = _voice;
         var guild = _guildId;
         _voice = null; _guildId = null; _channelId = null;
+        InVoice = false;
         if (vc is not null)
         {
             vc.VoiceReceive -= OnVoiceReceive;

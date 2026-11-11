@@ -6,7 +6,8 @@ using NAudio.Wave.SampleProviders;
 namespace LifeLog.Collector.Windows.Sources;
 
 /// <summary>
-/// 디스코드 출력 상시 녹음(2026-11-11). 디스코드가 소리를 내보내는 렌더 장치(가상 케이블 등, 플러그인 win-discord-output 설정 output_device)를
+/// 디스코드 출력 녹음(2026-11-11). <b>디스코드 통화 중일 때만</b>(<see cref="DiscordCall.Recording"/>, 봇이 녹음 중이면 쉼) 장치를 연다. 통화가 끝나면 열린 파일을 바로 닫는다.
+/// 디스코드가 소리를 내보내는 렌더 장치(가상 케이블 등, 플러그인 win-discord-output 설정 output_device)를
 /// WASAPI 루프백으로 계속 듣다가 소리 있는 구간만 파일로 남긴다(<see cref="WasapiSegmentCapture"/>).
 /// 구간 규칙은 폰 녹음(collector-android AudioSource.kt)과 같다(<see cref="Segmenter"/>, laptop_mic과 공용).
 /// - 루프백은 아무것도 재생되지 않으면 데이터가 오지 않는다. 그동안은 벽시계에 맞춰 무음 프레임을 넣어 끝 판정이 멈추지 않게 한다.
@@ -40,7 +41,9 @@ public sealed class DiscordOutputSource : ISource
         string? lastError = null;
         while (!_cts.IsCancellationRequested)
         {
-            try { CaptureOnce(); lastError = null; }
+            // 디스코드 통화 중일 때만 장치를 연다(봇이 녹음 중이면 쉰다)
+            if (!DiscordCall.WaitForRecording(_cts.Token)) break;
+            try { CaptureOnce(); lastError = null; continue; }
             catch (Exception e)
             {
                 if (e.Message != lastError) _log($"[discord-output] {e.Message}. 10초 뒤 다시 시도");
@@ -67,6 +70,7 @@ public sealed class DiscordOutputSource : ISource
         var settingsSig = DiscordSettings.Signature;
         WasapiSegmentCapture.Run(device, loopback: true, new Segmenter(Folder, "discord-output", _emit!, _log), "discord-output", _log, _cts.Token, () =>
         {
+            if (!DiscordCall.Recording) { _log($"[discord-output] 녹음 멈춤({DiscordCall.Why}). 장치를 닫습니다"); return true; }
             // 장치를 바꾸면(discord-device) 다시 붙는다
             if (DiscordSettings.Signature == settingsSig) return false;
             settingsSig = DiscordSettings.Signature;
