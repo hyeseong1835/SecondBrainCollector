@@ -27,7 +27,7 @@ import java.util.UUID
 /**
  * 노트북 링크(BLE GATT 클라이언트). 노트북 수집기(phone_link 소스)가 광고하는 SecondBrain 서비스를 찾아 붙고,
  *   2초마다 연결 RSSI를 읽어 10초마다 묶어 보낸다({ t: rssi, s: [[몇 ms 전, rssi], …] }),
- *   5분마다 시계를 잰다(ping → pong → { t: clock, offset_ms, rtt_ms }. offset = 폰 시계 − 노트북 시계).
+ *   5분마다 시계를 잰다(잠깐 빠른 연결로 5번, ping → pong → { t: clock, offset_ms, rtt_ms }. offset = 폰 시계 − 노트북 시계).
  * 끊기면 서비스 UUID 필터 스캔(저전력)으로 다시 찾는다. 스캔은 10분마다 새로 건다(오래된 스캔은 시스템이 기회적 스캔으로 낮춘다).
  * 낸 이벤트:
  *   { kind: link, state: connected | disconnected, name }
@@ -200,9 +200,15 @@ class LaptopLinkSource(private val context: Context) : EventSource {
         h.postDelayed(send, SEND_EVERY)
     }
 
+    // 시계 재기: 저전력 연결은 왕복이 0.6~0.9초라 오차가 크다. 잴 때만 연결을 빠르게(HIGH) 바꾸고 5번 보낸 뒤 되돌린다.
+    // 노트북·폰 플러그인은 왕복이 가장 짧은 측정을 쓴다
+    @SuppressLint("MissingPermission")
     private val ping: Runnable = Runnable {
-        if (!ready) return@Runnable
-        send(JSONObject().put("t", "ping").put("id", ++pingId).put("c0", System.currentTimeMillis()))
+        val g = gatt
+        if (!ready || g == null) return@Runnable
+        guard("priority") { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) }
+        for (i in 0 until 5) h.postDelayed({ if (ready) send(JSONObject().put("t", "ping").put("id", ++pingId).put("c0", System.currentTimeMillis())) }, 1_000L + i * 400L)
+        h.postDelayed({ if (ready) guard("priority") { gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER) } }, 5_000L)
         h.postDelayed(ping, CLOCK_EVERY)
     }
 
