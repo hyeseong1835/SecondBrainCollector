@@ -17,7 +17,7 @@ let cand = null;      // { zone, since }
 let samples = [];     // 지금 구간 + 후보 동안의 [ms, rssi]
 let minute = [];      // 1분 요약용 rssi
 let lastRssi = 0, advOn = null;
-let cfg = { ref: -60, n: 2.5, minutes: true };
+let cfg = { ref: -53, n: 2.5, minutes: true };
 
 function median(a) { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.floor(s.length / 2)] : null; }
 function dist(rssi) { return Math.pow(10, (cfg.ref - rssi) / (10 * cfg.n)); }
@@ -73,7 +73,12 @@ function judge(ctx, now) {
     return;
   }
   if (target === prox.zone) { cand = null; return; }
-  if (!cand || cand.zone !== target) { cand = { zone: target, since: target === "disconnected" ? Math.min(now, link && link.closing ? t(link.closing) : now) : now }; return; }
+  // 연결 없음에서 신호가 다시 잡히면 기다리지 않고 바로 바꾼다
+  if (prox.zone === "disconnected") { closeProx(ctx, now); openProx(ctx, target, now); return; }
+  const since = target === "disconnected" ? Math.min(now, link && link.closing ? t(link.closing) : now) : now;
+  if (!cand) { cand = { zone: target, since }; return; }
+  // 지금 구간이 아닌 상태가 이어지는 동안은 since를 유지한다(후보끼리 오가도 30초 뒤 마지막 후보로 넘어간다). 연결 없음은 끊긴 시각부터
+  if (cand.zone !== target) { cand.zone = target; if (target === "disconnected") cand.since = since; }
   if (now - cand.since >= SETTLE) {
     const { zone, since } = cand;
     cand = null;
@@ -103,7 +108,7 @@ function sleep(ctx, at) {
 export default {
   start(ctx) {
     const s = ctx.settings || {};
-    cfg = { ref: typeof s.ref_rssi_1m === "number" ? s.ref_rssi_1m : -60, n: typeof s.path_loss_n === "number" && s.path_loss_n > 0 ? s.path_loss_n : 2.5,
+    cfg = { ref: typeof s.ref_rssi_1m === "number" ? s.ref_rssi_1m : -53, n: typeof s.path_loss_n === "number" && s.path_loss_n > 0 ? s.path_loss_n : 2.5,
       minutes: s.rssi_minutes !== false };
     ctx.on("phone_link", ev => {
       const now = t(ev.time);

@@ -73,9 +73,9 @@
     {
       "key": "ref_rssi_1m",
       "type": "number",
-      "default": -60,
+      "default": -53,
       "label": "1m 기준 RSSI(dBm)",
-      "description": "폰을 1m에 둘 때의 RSSI. phone-link-calibrate 명령으로 잰다."
+      "description": "폰을 1m에 둘 때의 RSSI. phone-link-calibrate 명령으로 잰다. 기본 -53은 S26 Ultra·이 노트북으로 잰 값(2026-11-13: 30cm −45~−52, 3~4m −57~−62, 방 밖 −77~−81)."
     },
     {
       "key": "path_loss_n",
