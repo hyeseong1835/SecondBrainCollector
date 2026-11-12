@@ -62,6 +62,7 @@ class LaptopLinkSource(private val context: Context) : EventSource {
     private var name: String? = null
     private val pending = ArrayList<Pair<Long, Int>>()   // (elapsedRealtime, rssi)
     private var pingId = 0
+    private var lastPong = 0L                              // elapsedRealtime
     private val ops = ArrayDeque<() -> Boolean>()          // GATT 작업은 한 번에 하나
     private var busy = false
 
@@ -172,6 +173,7 @@ class LaptopLinkSource(private val context: Context) : EventSource {
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) = guard("notify") {
             val m = JSONObject(String(value, Charsets.UTF_8))
             if (m.optString("t") == "pong") {
+                lastPong = SystemClock.elapsedRealtime()
                 val c1 = System.currentTimeMillis(); val c0 = m.getLong("c0"); val s = m.getLong("s")
                 val rtt = c1 - c0
                 val offset = (c0 + c1) / 2 - s   // 폰 시계 − 노트북 시계
@@ -209,6 +211,10 @@ class LaptopLinkSource(private val context: Context) : EventSource {
         guard("priority") { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) }
         for (i in 0 until 5) h.postDelayed({ if (ready) send(JSONObject().put("t", "ping").put("id", ++pingId).put("c0", System.currentTimeMillis())) }, 1_000L + i * 400L)
         h.postDelayed({ if (ready) guard("priority") { gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER) } }, 5_000L)
+        // 노트북 수집기가 다시 시작되면 링크는 남아 있어도 새 GATT 서버의 알림을 구독하지 않은 상태가 된다(pong이 안 온다).
+        // 그러면 끊고 다시 찾아 붙는다(구독부터 새로)
+        val burst = SystemClock.elapsedRealtime()
+        h.postDelayed({ val cur = gatt; if (ready && cur === g && lastPong < burst) drop(cur, "pong 없음(노트북 서버가 바뀐 듯)") }, 10_000L)
         h.postDelayed(ping, CLOCK_EVERY)
     }
 
@@ -237,6 +243,7 @@ class LaptopLinkSource(private val context: Context) : EventSource {
 
     @SuppressLint("MissingPermission")
     private fun drop(g: BluetoothGatt, why: String) {
+        guard("disconnect") { g.disconnect() }
         guard("close") { g.close() }
         if (gatt !== g) return
         gatt = null; rx = null
