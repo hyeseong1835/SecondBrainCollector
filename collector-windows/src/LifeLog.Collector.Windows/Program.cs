@@ -41,6 +41,11 @@ static class Cli
           mic-device <이름 일부|ID|default>   녹음할 입력 장치. default면 Windows 기본 통신 입력 장치를 따른다
           mic-test [초] [--device 이름] [--levels]   시험용: 마이크 소스만 돌려(통화 중일 때만 연다) 생긴 파일 기록을 찍는다(행은 안 냄). --levels는 5초마다 입력 레벨
 
+          폰 링크(플러그인 win-phone-link. 폰 수집기가 BLE로 붙어 RSSI·시계 차이를 보낸다):
+          phone-link-test [초]      시험용: 링크 소스만 돌려 이벤트를 찍는다(실행 중인 수집기에 win-phone-link가 켜져 있으면 끄고 할 것)
+          phone-link-calibrate [초] [--at 거리m]   폰을 노트북에서 거리m(기본 1)에 두고 실행. 실행 중인 수집기가 받은 RSSI 중앙값으로
+                                   기준 RSSI(ref_rssi_1m)를 정한다
+
         로그: %LOCALAPPDATA%\SecondBrain\collector\collector.log (옛 %LOCALAPPDATA%\LifeLog\collector는 처음 실행 때 옮긴다)
         """;
 
@@ -79,6 +84,8 @@ static class Cli
                 case "mic-device": return await DiscordCli.SetMicDevice(string.Join(' ', args[1..]));
                 case "discord-call": return DiscordCli.CallStatus(args[1..]);
                 case "mic-test": return DiscordCli.MicTest(args[1..]);
+                case "phone-link-test": return PhoneLinkCli.Test(args[1..]);
+                case "phone-link-calibrate": return await PhoneLinkCli.Calibrate(args[1..]);
                 default: Console.WriteLine(Usage); return 1;
             }
         }

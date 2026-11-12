@@ -1,0 +1,34 @@
+{
+  "type": "renderer",
+  "id": "widget-proximity",
+  "version": "1.0.0",
+  "name": "폰↔노트북 거리",
+  "description": "폰↔노트북 BLE 링크의 거리 구간(붙어 있음·같은 방·근처·연결 없음) 타임라인과 RSSI 그래프(중앙값 선, 최소~최대 띠, 1m·5m 경계선)",
+  "min_host_version": 1,
+  "platforms": [
+    "windows",
+    "android"
+  ],
+  "runtimes": {
+    "webview": "index.html"
+  },
+  "slot": "card",
+  "inputs": [
+    "win-phone-link/proximity@1",
+    "win-phone-link/rssi@1"
+  ],
+  "settings": [
+    {
+      "key": "ref_rssi_1m",
+      "type": "number",
+      "default": -53,
+      "label": "1m 기준 RSSI(경계선용, 수집기 설정과 맞춘다)"
+    },
+    {
+      "key": "path_loss_n",
+      "type": "number",
+      "default": 2.5,
+      "label": "경로 손실 지수(경계선용)"
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "type": "collector",
+  "id": "win-phone-link",
+  "version": "1.0.0",
+  "name": "폰 링크·거리 (Windows)",
+  "min_host_version": 1,
+  "platforms": [
+    "windows"
+  ],
+  "runtimes": {
+    "js": "main.js"
+  },
+  "capabilities": [
+    {
+      "id": "event:phone_link",
+      "required": true
+    },
+    {
+      "id": "timer",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "link",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "reconnects": "integer",
+        "clock_offset_ms": "integer",
+        "rtt_ms": "integer"
+      },
+      "label": "reconnects",
+      "identity": []
+    },
+    {
+      "name": "proximity",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "zone": "text",
+        "distance_m": "double precision",
+        "rssi_median": "integer",
+        "rssi_min": "integer",
+        "rssi_max": "integer",
+        "samples": "integer",
+        "confidence": "text"
+      },
+      "label": "zone",
+      "identity": [
+        "zone"
+      ],
+      "index": [
+        "zone"
+      ]
+    },
+    {
+      "name": "rssi",
+      "kind": "event",
+      "schema_version": 1,
+      "columns": {
+        "rssi_median": "integer",
+        "rssi_min": "integer",
+        "rssi_max": "integer",
+        "samples": "integer"
+      },
+      "label": "rssi_median",
+      "identity": []
+    }
+  ],
+  "description": "폰 수집기와 BLE로 직접 연결해 폰↔노트북 거리 구간(붙어 있음 ≤1m · 같은 방 ≤5m · 근처 · 연결 없음)을 기록한다. 장소 이름은 붙이지 않는다.",
+  "settings": [
+    {
+      "key": "ref_rssi_1m",
+      "type": "number",
+      "default": -53,
+      "label": "1m 기준 RSSI(dBm)",
+      "description": "폰을 1m에 둘 때의 RSSI. phone-link-calibrate 명령으로 잰다. 기본 -53은 S26 Ultra·이 노트북으로 잰 값(2026-11-13: 30cm −45~−52, 3~4m −57~−62, 방 밖 −77~−81)."
+    },
+    {
+      "key": "path_loss_n",
+      "type": "number",
+      "default": 2.5,
+      "label": "경로 손실 지수",
+      "description": "거리 추정식 d = 10^((기준 − RSSI)/(10·n)). 실내는 2~3."
+    },
+    {
+      "key": "rssi_every",
+      "type": "number",
+      "default": 10,
+      "label": "RSSI 저수준 기록 간격(초)",
+      "description": "이 간격마다 중앙값·최소·최대·개수 한 줄(10초면 하루 약 1.5MB). 0이면 끈다. 일단 10초, 보정이 끝나면 늘린다."
+    }
+  ]
+}

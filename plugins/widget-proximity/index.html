@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<style>
+  :root { --fg:#ddd; --mute:#888; --line:#2a2a2a; --track:#262626; --band:rgba(100,170,255,.22); --med:#64aaff; color-scheme: dark; }
+  :root[data-theme="light"] { --fg:#1c1c1e; --mute:#6b6b70; --line:#dcdce0; --track:#ececef; --band:rgba(30,110,220,.16); --med:#1e6edc; color-scheme: light; }
+  html, body { height:100%; }
+  body { margin:0; padding:8px 12px 6px; font: 11px/1.35 "Segoe UI Variable", "Segoe UI", sans-serif; color:var(--fg); background:transparent; box-sizing:border-box; overflow:hidden; }
+  #root { display:flex; flex-direction:column; height:100%; }
+  #root.mute { display:block; color:var(--mute); }
+  .stats { display:flex; flex-wrap:wrap; gap:2px 14px; margin-bottom:4px; }
+  .stats b { font-size:15px; font-weight:600; font-variant-numeric: tabular-nums; }
+  .stats span { color:var(--mute); margin-left:4px; }
+  .track { position:relative; height:14px; background:var(--track); border-radius:3px; overflow:hidden; margin:2px 0 4px; }
+  .seg { position:absolute; top:0; bottom:0; min-width:1px; }
+  .chart { flex:1; min-height:80px; position:relative; }
+  .chart svg { position:absolute; inset:0; width:100%; height:100%; }
+  text { fill:var(--mute); font-size:10px; }
+  .legend { display:flex; flex-wrap:wrap; gap:2px 10px; color:var(--mute); margin-top:2px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:4px; vertical-align:middle; }
+</style></head>
+<body><div id="root" class="mute">불러오는 중…</div>
+<script src="https://app.lifelog/sdk.js"></script>
+<script>
+// 폰↔노트북 거리. win-phone-link/proximity 구간을 색 띠로, win-phone-link/rssi(저수준 요약)를 중앙값 선 + 최소~최대 띠로.
+// 점선은 1m·5m 경계에 해당하는 RSSI(ref − 10·n·log10(d)). 60초 넘게 비면 선을 끊는다.
+const S = LifeLogSdk;
+const ZONE = { touching: ["붙어 있음 ≤1m", "#30d158"], room: ["같은 방 ≤5m", "#64aaff"], near: ["근처(신호 있음)", "#ff9f0a"], disconnected: ["연결 없음", "#8e8e93"] };
+async function q(view, opts) { try { return (await lifelog.query(view, opts)).rows; } catch (e) { return []; } }
+
+lifelog.ready(async (range, widget) => {
+  const st = widget.settings || {};
+  const ref = typeof st.ref_rssi_1m === "number" ? st.ref_rssi_1m : -53, n = typeof st.path_loss_n === "number" && st.path_loss_n > 0 ? st.path_loss_n : 2.5;
+  const root = document.getElementById("root");
+  const S0 = S.ms(range.start), E0 = S.ms(range.end), span = E0 - S0, now = Math.min(Date.now(), E0);
+  const prox = S.clip((await q("win-phone-link/proximity", { range, limit: 20000 })).map(r => Object.assign({}, r, { end: r.end || new Date(now).toISOString() })), range.start, range.end);
+  const rssi = (await q("win-phone-link/rssi", { range, limit: 50000 })).filter(r => r.rssi_median != null).sort((a, b) => S.ms(a.time) - S.ms(b.time));
+  if (!prox.length && !rssi.length) { root.textContent = "거리 기록 없음 (노트북 win-phone-link · 폰 phone-laptop-link가 켜져 있어야 한다)"; return; }
+  root.className = "";
+
+  // 구간별 시간
+  const by = {}; for (const r of prox) by[r.zone] = (by[r.zone] || 0) + r.e - r.s;
+  const last = prox.length ? prox.reduce((a, b) => (b.s > a.s ? b : a)) : null;
+  let stats = last ? `<div><b style="color:${(ZONE[last.zone] || [])[1]}">${(ZONE[last.zone] || [last.zone])[0]}</b><span>${last.distance_m != null ? "약 " + last.distance_m + "m · " : ""}${S.fmtTime(last.s)}부터</span></div>` : "";
+  for (const z of Object.keys(ZONE)) if (by[z]) stats += `<div><b>${S.fmtDur(by[z])}</b><span>${ZONE[z][0]}</span></div>`;
+  const lane = prox.map(r => `<div class="seg" title="${(ZONE[r.zone] || [r.zone])[0]} ${S.fmtTime(r.s)}–${S.fmtTime(r.e)} (${S.fmtDur(r.e - r.s)})${r.rssi_median != null ? ` · RSSI 중앙값 ${r.rssi_median} (${r.rssi_min}~${r.rssi_max}) · 약 ${r.distance_m}m · ${r.samples}개 · 신뢰도 ${r.confidence}` : ""}"
+    style="left:${(r.s - S0) / span * 100}%;width:${(r.e - r.s) / span * 100}%;background:${(ZONE[r.zone] || [, "#555"])[1]}"></div>`).join("");
+  root.innerHTML = `<div class="stats">${stats}</div><div class="track">${lane}</div><div class="chart"></div>
+    <div class="legend">${Object.values(ZONE).map(([l, c]) => `<span><span class="dot" style="background:${c}"></span>${l}</span>`).join("")}<span>— RSSI 중앙값 · 띠 최소~최대 · 점선 1m/5m</span></div>`;
+
+  const chart = root.querySelector(".chart");
+  const W = Math.max(200, chart.clientWidth || 600), H = Math.max(80, chart.clientHeight || 160), L = 30, R = 6, T = 4, B = 16, pw = W - L - R, ph = H - T - B;
+  const vals = rssi.flatMap(r => [r.rssi_min, r.rssi_max]).filter(v => v != null);
+  const [lo, hi] = S.chart.nice(Math.min(-90, ...vals), Math.max(-40, ...vals), 10);
+  const X = t => L + (t - S0) / span * pw, Y = v => T + (hi - v) / (hi - lo) * ph;
+  let svg = `<svg viewBox="0 0 ${W} ${H}">`;
+  for (let v = lo; v <= hi; v += 10) svg += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--line)"/><text x="${L - 4}" y="${Y(v) + 3}" text-anchor="end">${v}</text>`;
+  for (const [d, c] of [[1, ZONE.touching[1]], [5, ZONE.room[1]]]) {
+    const v = ref - 10 * n * Math.log10(d);
+    if (v > lo && v < hi) svg += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="${c}" stroke-dasharray="4 4"><title>${d}m ≈ ${v.toFixed(0)} dBm</title></line>`;
+  }
+  // 60초 넘게 빈 곳에서 끊어 조각별로 띠·선
+  const parts = []; let cur = [];
+  for (const r of rssi) { const t = S.ms(r.time); if (cur.length && t - S.ms(cur[cur.length - 1].time) > 60e3) { parts.push(cur); cur = []; } cur.push(r); }
+  if (cur.length) parts.push(cur);
+  for (const p of parts) {
+    const top = p.map(r => ({ x: X(S.ms(r.time)), y: Y(r.rssi_max) })), bot = p.map(r => ({ x: X(S.ms(r.time)), y: Y(r.rssi_min) })).reverse();
+    svg += `<path d="${S.chart.line(top.concat(bot))}Z" fill="var(--band)" stroke="none"/>`;
+    svg += `<path d="${S.chart.line(p.map(r => ({ x: X(S.ms(r.time)), y: Y(r.rssi_median) })))}" fill="none" stroke="var(--med)" stroke-width="1.3"/>`;
+  }
+  // 눈금: 하루면 6시간(오전·오후), 짧은 범위면 15분~2시간 간격 시각
+  const stepH = span > 18 * 3600e3 ? 6 : span > 6 * 3600e3 ? 2 : span > 2 * 3600e3 ? 0.5 : 0.25, step = stepH * 3600e3;
+  for (let t = Math.ceil(S0 / step) * step; t <= E0; t += step) svg += `<text x="${Math.min(W - 14, Math.max(L + 10, X(t)))}" y="${H - 3}" text-anchor="middle">${stepH === 6 ? S.chart.ampm(t) : S.fmtTime(t)}</text>`;
+  svg += "</svg>";
+  chart.innerHTML = svg;
+});
+</script></body></html>
