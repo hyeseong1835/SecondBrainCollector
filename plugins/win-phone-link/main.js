@@ -4,7 +4,8 @@
 //   proximity  거리 구간이 같던 동안. zone = touching(≤1m) | room(≤5m) | near(그 너머, 신호는 있음) | disconnected(링크 없음·60초 동안 RSSI 없음)
 //              10초 창 RSSI 중앙값 → d = 10^((ref_rssi_1m − rssi)/(10·n)). 경계에서 1.25배 히스테리시스, 새 구간은 30초 유지돼야 연다
 //              (그보다 짧은 흔들림은 앞 구간에 합쳐진다). distance_m·rssi_* = 구간 전체 RSSI 중앙값 기준, confidence = 표준편차·개수로 high|medium|low
-//   rssi       1분 요약(중앙값·최소·최대·개수). 설정 rssi_minutes로 끈다
+//   rssi       저수준 기록: rssi_every초(기본 10초)마다 그 동안 받은 RSSI의 중앙값·최소·최대·개수 한 줄. 0이면 끈다
+//              (일단 10초. 하루 8,640줄 ≈ 1.5MB. 기숙사 등에서 보정이 끝나면 늘리거나 끈다)
 // 노트북이 잠들거나 수집기가 꺼진 동안은 광고를 끄므로 구간을 닫고 공백으로 둔다(멀리 있다고 기록하지 않는다).
 const LINK_HOLD = 30e3, WINDOW = 10e3, SETTLE = 30e3, STALE = 60e3, GRACE = 60e3, HYST = 1.25;
 const BANDS = { touching: [0, 1], room: [1, 5], near: [5, Infinity] };
@@ -15,9 +16,9 @@ let link = null;      // { id, closing, reconnects, clocks: [{offset, rtt}] }
 let prox = null;      // { id, zone, start }
 let cand = null;      // { zone, since }
 let samples = [];     // 지금 구간 + 후보 동안의 [ms, rssi]
-let minute = [];      // 1분 요약용 rssi
+let minute = [];      // rssi 요약 한 줄에 들어갈 값
 let lastRssi = 0, advOn = null;
-let cfg = { ref: -53, n: 2.5, minutes: true };
+let cfg = { ref: -53, n: 2.5, every: 10 };
 
 function median(a) { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.floor(s.length / 2)] : null; }
 function dist(rssi) { return Math.pow(10, (cfg.ref - rssi) / (10 * cfg.n)); }
@@ -109,7 +110,7 @@ export default {
   start(ctx) {
     const s = ctx.settings || {};
     cfg = { ref: typeof s.ref_rssi_1m === "number" ? s.ref_rssi_1m : -53, n: typeof s.path_loss_n === "number" && s.path_loss_n > 0 ? s.path_loss_n : 2.5,
-      minutes: s.rssi_minutes !== false };
+      every: typeof s.rssi_every === "number" && s.rssi_every >= 0 ? Math.round(s.rssi_every) : 10 };
     ctx.on("phone_link", ev => {
       const now = t(ev.time);
       settleLink(ctx, now);
@@ -137,9 +138,9 @@ export default {
       }
     });
     ctx.every("5s", () => { const now = t(ctx.now()); settleLink(ctx, now); judge(ctx, now); });
-    ctx.every("1m", () => {
-      stats(ctx);
-      if (cfg.minutes && minute.length)
+    ctx.every("1m", () => stats(ctx));
+    if (cfg.every > 0) ctx.every(cfg.every + "s", () => {
+      if (minute.length)
         ctx.event.emit("rssi", { time: ctx.now(), rssi_median: median(minute), rssi_min: Math.min(...minute), rssi_max: Math.max(...minute), samples: minute.length });
       minute = [];
     });

@@ -85,11 +85,11 @@
       "description": "거리 추정식 d = 10^((기준 − RSSI)/(10·n)). 실내는 2~3."
     },
     {
-      "key": "rssi_minutes",
-      "type": "boolean",
-      "default": true,
-      "label": "1분 RSSI 요약 남기기",
-      "description": "1분마다 중앙값·최소·최대·개수 한 줄(하루 약 0.15MB). 보정이 끝나면 꺼도 된다."
+      "key": "rssi_every",
+      "type": "number",
+      "default": 10,
+      "label": "RSSI 저수준 기록 간격(초)",
+      "description": "이 간격마다 중앙값·최소·최대·개수 한 줄(10초면 하루 약 1.5MB). 0이면 끈다. 일단 10초, 보정이 끝나면 늘린다."
     }
   ]
 }
