@@ -4,11 +4,14 @@
 - 묶음이 maxSec보다 길면 가장 긴 간격(같으면 앞쪽)에서 둘로 나누고, 각각 다시 본다
 - singleSources(통화)는 파일 하나가 한 묶음
 - 마지막 파일 끝에서 gapSec이 아직 안 지났으면 진행 중(분석하지 않는다)
+- 디스코드 통화(2026-11-12, make_calls): callSources(디스코드 일반 녹음·노트북 마이크)의 묶음을 시각순으로 놓고 앞 묶음들의 가장 늦은 끝과
+  다음 묶음 시작의 간격이 gapSec 이하이면(겹쳐도) 한 통화로 잇는다(길이 상한 없음). 출처가 둘 다 든 것만 통화(한 출처뿐이면 묶음 그대로).
+  녹음·전사 결과는 출처별 묶음 그대로이고, 통화는 화면과 analyze.py --call이 합쳐 보이고 실행하는 단위다
 시각은 epoch ms 정수로 다룬다.
 """
 from dataclasses import dataclass, field
 
-DEFAULT_RULE = {"gapSec": 60, "maxSec": 1800, "singleSources": ["call"]}
+DEFAULT_RULE = {"gapSec": 60, "maxSec": 1800, "singleSources": ["call"], "callSources": ["discord-output", "laptop-mic"]}
 
 
 @dataclass
@@ -78,3 +81,19 @@ def in_progress(b: Bundle, now_ms: int, rule=DEFAULT_RULE) -> bool:
     if b.source in set(rule.get("singleSources") or []):
         return False
     return now_ms - b.end < rule["gapSec"] * 1000
+
+
+def make_calls(bundles, rule=DEFAULT_RULE):
+    """출처별 Bundle들 → 디스코드 통화(Bundle 목록, 시작 순)들. 두 출처 이상이 든 사슬만(시작 순)."""
+    gap = rule["gapSec"] * 1000
+    srcs = set(rule.get("callSources") or DEFAULT_RULE["callSources"])
+    mine = sorted((b for b in bundles if b.source in srcs), key=lambda b: (b.start, b.end, b.source))
+    chains, cur, cur_end = [], [], None
+    for b in mine:
+        if cur and b.start - cur_end <= gap:
+            cur.append(b); cur_end = max(cur_end, b.end)
+        else:
+            if cur: chains.append(cur)
+            cur, cur_end = [b], b.end
+    if cur: chains.append(cur)
+    return [c for c in chains if len({b.source for b in c}) > 1]

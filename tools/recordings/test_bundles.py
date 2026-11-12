@@ -2,9 +2,9 @@
 import sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
-from bundles import Item, make_bundles, in_progress
+from bundles import Item, make_bundles, make_calls, in_progress
 
-RULE = {"gapSec": 60, "maxSec": 1800, "singleSources": ["call"]}
+RULE = {"gapSec": 60, "maxSec": 1800, "singleSources": ["call"], "callSources": ["discord-output", "laptop-mic"]}
 S = 1000
 
 
@@ -45,6 +45,26 @@ class BundleTests(unittest.TestCase):
         self.assertTrue(in_progress(b, 69 * S, RULE))
         self.assertFalse(in_progress(b, 70 * S, RULE))
         self.assertFalse(in_progress(make_bundles([it("call", 0, 10)], RULE)[0], 11 * S, RULE))
+
+
+    def test_call_joins_two_sources_within_gap(self):
+        # 상대(0~100, 200~300)·내 쪽(150~250)이 잇고, 300+60=360에 시작하는 내 쪽도 같은 통화, 370+61=431은 아님
+        items = [it("discord-output", 0, 100), it("discord-output", 200, 300), it("laptop-mic", 150, 250), it("laptop-mic", 360, 370),
+                 it("laptop-mic", 431, 440), it("discord-output", 1000, 1010)]
+        calls = make_calls(make_bundles(items, RULE), RULE)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([(b.source, b.start // S) for b in calls[0]], [("discord-output", 0), ("laptop-mic", 150), ("discord-output", 200), ("laptop-mic", 360)])
+
+    def test_call_needs_both_sources_and_ignores_others(self):
+        items = [it("discord-output", 0, 10), it("discord-output", 1000, 1010), it("discord-bot", 5, 20), it("phone", 5, 20)]
+        self.assertEqual(make_calls(make_bundles(items, RULE), RULE), [])
+
+    def test_call_has_no_length_limit(self):
+        # 각 출처는 30분에서 나뉘어도 통화는 하나
+        items = [it("discord-output", t, t + 50) for t in range(0, 4000, 100)] + [it("laptop-mic", t + 20, t + 70) for t in range(0, 4000, 100)]
+        bundles = make_bundles(items, RULE)
+        self.assertGreater(len(bundles), 2)
+        self.assertEqual([len(c) for c in make_calls(bundles, RULE)], [len(bundles)])
 
 
 if __name__ == "__main__":
