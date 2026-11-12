@@ -1,0 +1,43 @@
+{
+  "type": "collector",
+  "id": "phone-laptop-link",
+  "version": "1.0.0",
+  "name": "노트북 링크 (안드로이드)",
+  "min_host_version": 1,
+  "platforms": [
+    "android"
+  ],
+  "runtimes": {
+    "js": "main.js"
+  },
+  "capabilities": [
+    {
+      "id": "event:laptop_link",
+      "required": true
+    },
+    {
+      "id": "timer",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "link",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "name": "text",
+        "reconnects": "integer",
+        "rssi_median": "integer",
+        "samples": "integer",
+        "clock_offset_ms": "integer",
+        "rtt_ms": "integer"
+      },
+      "label": "name",
+      "identity": [
+        "name"
+      ]
+    }
+  ],
+  "description": "노트북 수집기(win-phone-link)와 BLE로 직접 연결한다. 연결된 동안 RSSI·시계 차이를 노트북에 보내고, 폰 쪽에는 연결 구간만 남긴다. 거리 구간은 노트북이 기록한다."
+}

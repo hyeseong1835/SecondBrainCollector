@@ -182,7 +182,7 @@ static class DiscordCli
     }
 
     /// <summary>이 기기의 설치 설정 한 칸을 DB에 쓰고 실행 중인 수집기에 다시 읽기를 요청한다.</summary>
-    static async Task SetSettingAsync(string plugin, string key, JsonNode value)
+    internal static async Task SetSettingAsync(string plugin, string key, JsonNode value)
     {
         var cfg = Config.Load() ?? throw new InvalidOperationException("setup을 먼저 하세요");
         await using var db = Db.Open(cfg);
@@ -193,7 +193,7 @@ static class DiscordCli
         if (Cli.Reload()) Console.WriteLine("실행 중인 수집기에 다시 읽기를 요청했습니다");
     }
 
-    static async Task<string?> CurrentSettingAsync(string plugin, string key)
+    internal static async Task<string?> CurrentSettingAsync(string plugin, string key)
     {
         var cfg = Config.Load();
         if (cfg is null) return null;

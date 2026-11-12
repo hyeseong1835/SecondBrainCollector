@@ -247,7 +247,7 @@ fun PermissionsScreen(model: AppModel) {
         Perm("알림", "수집 중 상태 알림", has(android.Manifest.permission.POST_NOTIFICATIONS)) { perms.launch(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS)) },
         Perm("위치", "phone-location · phone-network (와이파이 이름)", has(android.Manifest.permission.ACCESS_FINE_LOCATION)) { perms.launch(arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION)) },
         Perm("위치 항상 허용", "화면이 꺼져도 위치·와이파이 이름 기록", has(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)) { perms.launch(arrayOf(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)) },
-        Perm("근처 기기", "phone-bluetooth (블루투스 연결 기기)", has(android.Manifest.permission.BLUETOOTH_CONNECT)) { perms.launch(arrayOf(android.Manifest.permission.BLUETOOTH_CONNECT)) },
+        Perm("근처 기기", "phone-bluetooth (블루투스 연결 기기) · phone-laptop-link (노트북 링크)", has(android.Manifest.permission.BLUETOOTH_CONNECT) && has(android.Manifest.permission.BLUETOOTH_SCAN)) { perms.launch(arrayOf(android.Manifest.permission.BLUETOOTH_CONNECT, android.Manifest.permission.BLUETOOTH_SCAN)) },
         Perm("마이크", "phone-audio (소리 있는 구간 녹음)", has(android.Manifest.permission.RECORD_AUDIO)) { perms.launch(arrayOf(android.Manifest.permission.RECORD_AUDIO)) },
         Perm("신체 활동", "포그라운드 health 종류", has(android.Manifest.permission.ACTIVITY_RECOGNITION)) { perms.launch(arrayOf(android.Manifest.permission.ACTIVITY_RECOGNITION)) },
         Perm("사용 정보 접근", "phone-app (앱 사용 구간)", usageOk) { ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) },

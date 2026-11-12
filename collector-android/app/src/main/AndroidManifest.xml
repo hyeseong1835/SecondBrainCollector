@@ -21,6 +21,9 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- 노트북 링크(laptop_link): SecondBrain 서비스 UUID로만 찾는다. 위치를 알아내는 데 쓰지 않는다 -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" tools:targetApi="s" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.health.READ_STEPS" />
     <uses-permission android:name="android.permission.health.READ_DISTANCE" />
     <uses-permission android:name="android.permission.health.READ_FLOORS_CLIMBED" />
@@ -62,7 +65,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <service android:name=".CollectorService" android:exported="false" android:foregroundServiceType="location|health|microphone|specialUse">
+        <service android:name=".CollectorService" android:exported="false" android:foregroundServiceType="location|health|microphone|connectedDevice|specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="personal activity logging to the user's own database" />
         </service>
 
