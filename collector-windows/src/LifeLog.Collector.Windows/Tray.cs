@@ -36,9 +36,11 @@ public sealed class Tray : IDisposable
         var status = new ToolStripMenuItem("SecondBrain Collector") { Enabled = false };
         menu.Items.Add(status);
         menu.Items.Add(new ToolStripSeparator());
-        // 디스코드 봇 녹음 켜고 끄기(플러그인 win-discord-bot 설정 enabled, DB에도 쓴다). 켜져 있으면 내가 음성 채널에 들어갈 때 봇이 따라 들어가 사람별로 저장한다
-        var bot = new ToolStripMenuItem("디스코드 봇 녹음") { CheckOnClick = false };
-        bot.Click += (_, _) => DiscordSettings.SetBotEnabled(!DiscordSettings.Load().BotEnabled);
+        // 디스코드 봇 녹음 모드(플러그인 win-discord-bot 설정 enabled·auto_only, DB에도 쓴다): 꺼짐 · 켜짐(어디든 따라감) · 자동(등록한 서버·채널에서만)
+        var bot = new ToolStripMenuItem("디스코드 봇 녹음");
+        var modes = new[] { (DiscordSettings.ModeOff, "꺼짐"), (DiscordSettings.ModeOn, "켜짐 (어디든 따라감)"), (DiscordSettings.ModeAuto, "자동 (등록한 서버·채널만)") }
+            .Select(x => { var it = new ToolStripMenuItem(x.Item2) { Tag = x.Item1 }; it.Click += (_, _) => DiscordSettings.SetBotMode(x.Item1); return it; }).ToArray();
+        bot.DropDownItems.AddRange(modes);
         var botStatus = new ToolStripMenuItem("") { Enabled = false };
         menu.Items.Add(bot);
         menu.Items.Add(botStatus);
@@ -49,7 +51,9 @@ public sealed class Tray : IDisposable
         menu.Opening += (_, _) =>
         {
             status.Text = _status();
-            bot.Checked = DiscordSettings.Load().BotEnabled;
+            var mode = DiscordSettings.Load().BotMode;
+            foreach (var it in modes) it.Checked = (string)it.Tag! == mode;
+            bot.Checked = mode != DiscordSettings.ModeOff;
             botStatus.Text = "  봇: " + DiscordBotSource.StatusText;
         };
         _icon = new NotifyIcon { Icon = SystemIcons.Application, Text = "SecondBrain Collector", Visible = true, ContextMenuStrip = menu };

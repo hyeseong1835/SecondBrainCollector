@@ -45,6 +45,9 @@ $EXE autostart on        # 로그온 시 `run --tray` (작업 스케줄러)
   소리 있는 구간만 `%USERPROFILE%\SecondBrainRecordings\discord-output\날짜\*.m4a`(폰 녹음과 같은 구간 규칙). 열은 phone-audio와 같다.
 - 봇: 일반 터미널에서 `discord-token`(토큰·내 사용자 ID를 직접 입력, 화면에 안 보임, DPAPI) → 트레이 "디스코드 봇 녹음" 또는 `discord-bot on`.
   내가 음성 채널에 들어가면 봇(HearingAid와 같은 봇)이 따라 들어가 사람별 파일 `discord-bot\날짜\시각-사용자ID-xxxx.m4a` + 옆 `.json`(표시 이름·서버·채널). 플러그인 `win-discord-bot`.
+  모드(2026-11-13): 꺼짐 · 켜짐(어디든 따라감) · 자동(등록한 서버·채널에서만). `discord-bot off|on|auto`, 트레이 하위 메뉴, 데스크톱 녹음 화면(자동 목록 고르기).
+  설정 `enabled`·`auto_only`·`auto_targets`(`guild:ID`·`channel:ID`). 봇이 볼 수 있는 서버·음성 채널은 `%LOCALAPPDATA%\SecondBrain\collector\discord-bot-guilds.json`.
+  플러그인을 다시 설치(`install ... --grant-all`)해도 이 기기의 기존 설정은 남는다.
 - AAC 인코딩은 ffmpeg(`SECONDBRAIN_FFMPEG` → `%LOCALAPPDATA%\SecondBrainnalysisfmpeg` → PATH). Media Foundation AAC는 16kHz·32kbps를 못 쓴다.
 - `discord-simulate <wav>`: WAV를 상시 녹음 구간 규칙에 흘려 본다(시험용, `%TEMP%\secondbrain-simulate`에 씀).
 - 분석: `tools/recordings/analyze.py`가 `discord-output`·`discord-bot`(기기 laptop)을 읽는다. 봇 파일은 세그먼트 speaker = 디스코드 표시 이름.
