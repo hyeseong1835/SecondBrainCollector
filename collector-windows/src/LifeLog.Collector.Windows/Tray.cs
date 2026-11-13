@@ -27,6 +27,10 @@ public sealed class Tray : IDisposable
     {
         // 콘솔에서 떨어진다. 창을 숨기기만 하면 PowerShell 창에서 띄운 경우 그 창을 닫을 때 수집기도 같이 죽는다(CTRL_CLOSE). 로그는 파일에 남는다
         FreeConsole();
+        // 떨어지기 전에 콘솔에 한 번이라도 썼으면 Console.Out/Error가 닫힌 콘솔 핸들을 쥐고 있어 이후 쓰기마다 IOException이 난다.
+        // (2026-11-14: 시작 줄을 FreeConsole 전에 쓰게 바꾼 뒤 바로가기로 켜면 로그 한 줄만 남기고 죽었다) 그래서 버린다.
+        Console.SetOut(TextWriter.Null);
+        Console.SetError(TextWriter.Null);
         _thread.Start();
     }
 
