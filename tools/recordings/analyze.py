@@ -30,8 +30,11 @@
   laptop-mic/      노트북 마이크 상시 녹음(데스크톱 수집기). 기기 laptop, file은 "laptop-mic/<날짜>/<이름>.m4a". 기숙사에선 룸메이트 목소리도 잡혀 화자 구분 대상
 화자 구분: speakers.py(sherpa-onnx). phone·call·laptop-mic. '나' 기준은 python speakers.py enroll로 먼저 만든다(없으면 화자1·화자2…만)
 도구·모델: %LOCALAPPDATA%/SecondBrain/analysis (whisper.cpp Vulkan 빌드, ffmpeg, llama.cpp Vulkan, 모델들)
-  전사 batisay-ko-turbo q8_0 + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
+  전사 모델은 고를 수 있다(asrmodels.py, 기본 batisay-ko-turbo q8_0) + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
 API: %LOCALAPPDATA%/SecondBrain/api.json의 url·key(훅 키). 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 있으면 그것(시험 인스턴스)
+전사 모델(--asr-model, 2026-11-13): models/ggml-*.bin 중 하나. 주지 않으면 settings.json의 asrModel(데스크톱 설정에서 고름) → batisay-ko-turbo-q8_0
+  python analyze.py --list-models   # 쓸 수 있는 모델과 기본값(JSON)
+  python analyze.py --source phone --pick X.m4a --asr-model large-v3-turbo --dry-run
 단계(--stage, 2026-11-11): transcribe(기본) = 전사·화자 구분만 올린다(요약 비움). all = 예전처럼 전사하고 바로 요약
 """
 import argparse, datetime as dt, json, os, re, subprocess, sys, tempfile, time, urllib.parse, urllib.request
@@ -40,11 +43,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 import bundles as B
 import runlock
 import trash as T
+import asrmodels as M
 
 LOCAL = Path(os.environ["LOCALAPPDATA"])
 A = LOCAL / "SecondBrain" / "analysis"
 WHISPER = A / "src" / "whisper.cpp" / "build" / "bin" / "whisper-cli.exe"
-ASR_MODEL = A / "models" / "ggml-batisay-ko-turbo-q8_0.bin"
+ASR_MODEL = A / "models" / f"ggml-{M.DEFAULT}.bin"   # run()이 --asr-model·설정값으로 바꾼다
 VAD_MODEL = A / "models" / "ggml-silero-v5.1.2.bin"
 LLM_MODEL = A / "models" / "EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf"
 LLAMA = A / "llama" / "llama-server.exe"
@@ -54,7 +58,7 @@ SOURCES = {"phone": "phone", "discord-output": "laptop", "discord-bot": "laptop"
 REL_PREFIX = {"call": "call/", "laptop-mic": "laptop-mic/"}   # 같은 기기의 다른 출처와 file 이름이 겹치지 않게
 LLM_PORT = 8089
 # whisper가 말소리 없는 곳에서 지어내는 흔한 문장(유튜브 자막 학습 흔적)
-HALLUCINATIONS = re.compile(r"^(시청해\s*주셔서\s*감사합니다|구독과\s*좋아요|MBC\s*뉴스|자막\s*제공|[.\s,!?♪]*)$")
+HALLUCINATIONS = re.compile(r"^(시청해\s*주셔서\s*감사합니다|구독과\s*좋아요|MBC\s*뉴스|자막\s*제공|[.\s,!?♪\-–—]*)$")   # large-v3-turbo는 화자가 바뀔 때 "-"만 든 단어를 낸다(2026-11-13)
 
 
 def api():
@@ -383,6 +387,8 @@ def main():
     ap.add_argument("--source", choices=list(SOURCES), help="이 원천 폴더만(예: phone)")
     ap.add_argument("--pick", help="--source 안에서 이 파일 이름이 든 묶음 하나만(이미 분석했어도 다시)")
     ap.add_argument("--call", help="이 파일 이름이 든 디스코드 통화(callSources 묶음들)의 미전사 묶음 전부(--redo면 전부)")
+    ap.add_argument("--asr-model", help="전사 모델 이름(models/ggml-<이름>.bin). 없으면 settings.json의 asrModel → " + M.DEFAULT)
+    ap.add_argument("--list-models", action="store_true", help="쓸 수 있는 전사 모델과 기본값을 JSON으로 보이고 끝낸다")
     ap.add_argument("--progress-json", action="store_true", help='진행을 "@@progress {json}" 줄로도 낸다')
     ap.add_argument("--only-new", action="store_true", help="--pick·--file로 고른 묶음이 이미 전사돼 있으면 건너뛴다(대기열에서 미전사로 넣은 것)")
     ap.add_argument("--no-auto-remove", action="store_true", help="말소리 없는 묶음을 휴지통으로 옮기지 않는다")
@@ -394,6 +400,19 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)   # 앱이 파이프로 읽어도 한 줄씩 바로·한글 그대로
     except (AttributeError, ValueError):
         pass
+    if a.list_models:
+        name, path = M.resolve(None)
+        print(json.dumps({"default": name if path else None, "configured": M.configured(), "settings": str(M.settings_path()),
+                          "models": [{"name": n, "bytes": size} for n, _, size in M.available()]}, ensure_ascii=False))
+        return
+    global ASR_MODEL
+    asr_name, asr_path = M.resolve(a.asr_model)
+    if asr_path is None and not a.plan and not a.sweep_silent:
+        have = ", ".join(n for n, _, _ in M.available()) or "없음"
+        progress("error", message=f"전사 모델 없음: {asr_name} (설치된 모델: {have})")
+        print(f"전사 모델이 없습니다: {asr_name}\n  설치된 모델: {have}\n  폴더: {M.models_dir()}")
+        sys.exit(2)
+    if asr_path: ASR_MODEL = asr_path
     if a.pick and not a.source: ap.error("--pick에는 --source가 필요합니다")
     if a.call and (a.pick or a.file or a.source): ap.error("--call은 --pick·--file·--source와 함께 쓸 수 없습니다")
     if not a.plan:
@@ -529,10 +548,11 @@ def call_jobs(a, get, rule, now):
 
 
 def run_jobs(a, call, jobs, n_done, n_progress):
+    print(f"전사 모델: {ASR_MODEL.stem.removeprefix('ggml-')}")
     print(("전사만 합니다(요약 안 함). " if a.stage == "transcribe" else "") + f"분석할 묶음 {len(jobs)}개(파일 {sum(len(b.items) for b in jobs)}개) · 이미 분석 {n_done} · 진행 중이라 건너뜀 {n_progress}")
     if not a.plan:
         runlock.set_plan([bundle_key(b) for b in jobs])
-        progress("plan", total=len(jobs), files=sum(len(b.items) for b in jobs), done=n_done, inProgress=n_progress, dryRun=a.dry_run, stage=a.stage)
+        progress("plan", total=len(jobs), files=sum(len(b.items) for b in jobs), done=n_done, inProgress=n_progress, dryRun=a.dry_run, stage=a.stage, asrModel=ASR_MODEL.stem.removeprefix("ggml-"))
     if a.plan or not jobs:
         if not a.plan: progress("end", analyzed=0, total=0)
         return
