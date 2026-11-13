@@ -5,6 +5,14 @@ using LifeLog.Core;
 using LifeLog.Collector.Windows;
 using Npgsql;
 
+// 처리되지 않은 예외로 꺼질 때 로그에 남긴다(2026-11-14: 로그 없이 꺼진 일을 좇다가)
+AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+    Host.AppendLog($"처리되지 않은 예외로 종료: {e.ExceptionObject}");
+TaskScheduler.UnobservedTaskException += (_, e) =>
+{
+    Host.AppendLog($"관찰되지 않은 작업 예외: {e.Exception.GetBaseException().Message}");
+    e.SetObserved();
+};
 return await Cli.RunAsync(args);
 
 static class Cli
@@ -92,6 +100,8 @@ static class Cli
         catch (Exception e)
         {
             Console.Error.WriteLine("오류: " + e.Message);
+            // run --tray는 콘솔이 숨겨져 있어 로그에도 남긴다
+            if (args[0] == "run") Host.AppendLog($"수집기 종료(오류): {e}");
             return 2;
         }
     }
@@ -192,6 +202,7 @@ static class Cli
         var cfg = Config.Load() ?? throw new InvalidOperationException("setup을 먼저 하세요");
         using var single = new Mutex(true, MutexName, out var first);
         if (!first) { Console.Error.WriteLine("이미 실행 중입니다. `stop`으로 끝내세요."); return 3; }
+        Host.AppendLog($"수집기 시작(pid {Environment.ProcessId}{(tray ? ", 트레이" : "")})");
         using var stop = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
         using var stopEvent = new EventWaitHandle(false, EventResetMode.ManualReset, StopEventName);
@@ -201,18 +212,38 @@ static class Cli
         using var trayIcon = tray ? new Tray(() => status, () => stop.Cancel()) : null;
         trayIcon?.Start();
         // reload 신호(install·대시보드)가 오면 호스트만 새로 만든다. 뮤텍스·트레이는 유지.
+        // 호스트가 실패하면(부팅 직후 네트워크·API가 아직 없음 등) 끝내지 않고 로그를 남긴 뒤 기다렸다 다시 띄운다.
+        // 예전에는 여기서 예외가 나면 숨은 콘솔에만 쓰고 끝나, 재부팅 뒤 자동 실행이 로그 없이 꺼져 있었다(2026-11-14).
+        var failures = 0;
         while (!stop.IsCancellationRequested)
         {
             using var round = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
             var reloadWait = ThreadPool.RegisterWaitForSingleObject(reloadEvent, (_, _) => round.Cancel(), null, -1, true);
-            await using var host = new Host(cfg);
-            using var statusTimer = new System.Threading.Timer(_ => status = host.Status, null, 0, 1000);
-            await host.RunAsync(round.Token);
-            reloadWait.Unregister(null);
+            var startedAt = DateTime.UtcNow;
+            try
+            {
+                await using var host = new Host(cfg);
+                using var statusTimer = new System.Threading.Timer(_ => status = host.Status, null, 0, 1000);
+                await host.RunAsync(round.Token);
+                failures = 0;
+            }
+            catch (Exception e) when (!stop.IsCancellationRequested)
+            {
+                // 오래 잘 돌다가 난 실패면 처음부터 짧게 기다린다
+                if (DateTime.UtcNow - startedAt > TimeSpan.FromMinutes(10)) failures = 0;
+                var wait = RetryDelay(failures++);
+                status = $"오류 · {wait.TotalSeconds:F0}초 뒤 다시: {e.Message}";
+                Host.AppendLog($"수집 실패: {e.GetBaseException().Message}. {wait.TotalSeconds:F0}초 뒤 다시 시도");
+                try { await Task.Delay(wait, round.Token); } catch (OperationCanceledException) { }
+            }
+            finally { reloadWait.Unregister(null); }
             if (!stop.IsCancellationRequested) { Console.WriteLine("플러그인 다시 읽기"); cfg = Config.Load() ?? cfg; }
         }
         return 0;
     }
+
+    /// <summary>호스트 재시도 간격: 15초, 30초, 1분, 2분, 4분, 이후 5분.</summary>
+    internal static TimeSpan RetryDelay(int failures) => TimeSpan.FromSeconds(Math.Min(300, 15 * Math.Pow(2, Math.Min(failures, 5))));
 
     static int SetTenant(string tenant)
     {

@@ -37,13 +37,21 @@ public sealed class Host : IAsyncDisposable
     private static readonly object LogLock = new();
     public string Status { get; private set; } = "시작 중";
 
-    public void Log(string msg)
+    public void Log(string msg) => AppendLog(msg);
+
+    /// <summary>
+    /// collector.log에 한 줄. 호스트가 없을 때(시작 실패·처리되지 않은 예외)도 쓴다.
+    /// --tray면 콘솔이 숨겨져 있어 여기 남기지 않으면 왜 꺼졌는지 알 수 없다.
+    /// </summary>
+    public static void AppendLog(string msg)
     {
         var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {msg}";
         Console.WriteLine(line);
         lock (LogLock)
         {
-            try { File.AppendAllText(LogPath, line + Environment.NewLine); } catch (IOException) { }
+            try { File.AppendAllText(LogPath, line + Environment.NewLine); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
     public DateTimeOffset Now() => Db.Now();
