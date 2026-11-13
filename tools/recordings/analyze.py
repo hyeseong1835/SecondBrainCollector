@@ -58,7 +58,7 @@ SOURCES = {"phone": "phone", "discord-output": "laptop", "discord-bot": "laptop"
 REL_PREFIX = {"call": "call/", "laptop-mic": "laptop-mic/"}   # 같은 기기의 다른 출처와 file 이름이 겹치지 않게
 LLM_PORT = 8089
 # whisper가 말소리 없는 곳에서 지어내는 흔한 문장(유튜브 자막 학습 흔적)
-HALLUCINATIONS = re.compile(r"^(시청해\s*주셔서\s*감사합니다|구독과\s*좋아요|MBC\s*뉴스|자막\s*제공|[.\s,!?♪\-–—]*)$")   # large-v3-turbo는 화자가 바뀔 때 "-"만 든 단어를 낸다(2026-11-13)
+HALLUCINATIONS = re.compile(r"^(시청해\s*주셔서\s*감사합니다|구독과\s*좋아요|MBC\s*뉴스|자막\s*제공|한글\s*자막.*|[.\s,!?♪\-–—]*)$")   # large-v3-turbo는 화자가 바뀔 때 "-"만 든 단어, 무음에 "한글자막 by …"를 낸다(2026-11-13)
 
 
 def api():
