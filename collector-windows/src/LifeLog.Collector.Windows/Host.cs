@@ -46,7 +46,8 @@ public sealed class Host : IAsyncDisposable
     public static void AppendLog(string msg)
     {
         var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {msg}";
-        Console.WriteLine(line);
+        // 콘솔이 없거나 떨어졌어도 로그 파일 쓰기는 해야 한다(예외 처리기 안에서도 부른다)
+        try { Console.WriteLine(line); } catch (IOException) { } catch (ObjectDisposedException) { }
         lock (LogLock)
         {
             try { File.AppendAllText(LogPath, line + Environment.NewLine); }
