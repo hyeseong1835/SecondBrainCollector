@@ -82,7 +82,20 @@ public static class PluginInstaller
             : "manifest.json이 여럿입니다. URL 뒤에 /tree/<브랜치>/<폴더>를 붙여 하나를 고르세요");
     }
 
-    /// <summary>복사 → 등록 → (grantAll이면) 권한 전부 허용하고 켬. expectType이 있으면 그 종류만 받는다.</summary>
+    /// <summary>이미 설치돼 있으면 그 설정 중 새 매니페스트가 선언한 키만(JSON). 없으면 null(전부 기본값).</summary>
+    static async Task<string?> KeptSettingsAsync(Db db, Manifest m, string device, CancellationToken ct)
+    {
+        Db.Install? old;
+        try { old = await db.GetInstallAsync(m.Id, device, ct); } catch (Exception) { return null; }
+        if (old is null || old.Settings.ValueKind != JsonValueKind.Object) return null;
+        var keys = m.Settings.Concat(m.Privacy).Select(d => d.Key).ToHashSet();
+        var o = new Dictionary<string, JsonElement>();
+        foreach (var p in old.Settings.EnumerateObject())
+            if (keys.Contains(p.Name) && p.Value.ValueKind != JsonValueKind.Null) o[p.Name] = p.Value;
+        return o.Count == 0 ? null : JsonSerializer.Serialize(o);
+    }
+
+    /// <summary>복사 → 등록 → (grantAll이면) 권한 전부 허용하고 켬(이미 설치돼 있으면 설정은 남긴다). expectType이 있으면 그 종류만 받는다.</summary>
     public static async Task<Result> InstallAsync(Db db, string device, string pluginsDir, string source, bool grantAll, string? expectType = null, CancellationToken ct = default)
     {
         var src = await FetchAsync(source, ct);
@@ -105,7 +118,13 @@ public static class PluginInstaller
         File.WriteAllText(Path.Combine(dest, ".source.json"), JsonSerializer.Serialize(new { source, installed_at = DateTime.UtcNow }));
         JsonElement? inst = null;
         if (grantAll)
-            inst = await db.SetInstallAsync(m.Id, device, m.Version, true, null, JsonSerializer.Serialize(m.Capabilities.Select(c => c.Id)), ct);
+        {
+            var granted = JsonSerializer.Serialize(m.Capabilities.Select(c => c.Id));
+            // 다시 설치(버전 올림)해도 이 기기의 기존 설정은 남긴다(2026-11-13). 새 매니페스트에 선언된 키만 넘기고, 타입이 바뀌어 거부되면 기본값으로
+            var keep = await KeptSettingsAsync(db, m, device, ct);
+            try { inst = await db.SetInstallAsync(m.Id, device, m.Version, true, keep, granted, ct); }
+            catch (Exception) when (keep is not null) { inst = await db.SetInstallAsync(m.Id, device, m.Version, true, null, granted, ct); }
+        }
         return new Result(m, dest, reg, inst);
     }
 }

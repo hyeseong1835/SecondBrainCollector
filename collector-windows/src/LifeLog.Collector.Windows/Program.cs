@@ -32,7 +32,7 @@ static class Cli
           discord-devices [--json] 렌더(출력) 장치 목록과 지금 고른 장치
           discord-device <이름 일부|ID>   상시 녹음할 장치를 정한다(루프백). 실행 중이면 10초 안에 다시 붙는다
           discord-token            봇 토큰과 따라갈 사용자 ID를 직접 입력해 DPAPI로 저장(화면에 표시하지 않음)
-          discord-bot on|off       봇 녹음 켜기/끄기(트레이 메뉴와 같다)
+          discord-bot off|on|auto  봇 녹음 꺼짐/켜짐(어디든)/자동(등록한 서버·채널만, 목록은 데스크톱 녹음 화면). 트레이 메뉴와 같다
 
           discord-call [초]        디스코드 통화 감지 확인(Discord 오디오 세션과 판정을 2초마다)
 

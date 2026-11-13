@@ -152,16 +152,20 @@ static class DiscordCli
         if (!ulong.TryParse(idText, out _) || idText.Length < 15) throw new ArgumentException("사용자 ID는 17~20자리 숫자입니다");
         SecretStore.Set(DiscordSettings.BotPlugin, DiscordSettings.TokenKey, token);
         await SetSettingAsync(DiscordSettings.BotPlugin, "target_user_id", JsonValue.Create(idText));
-        Console.WriteLine("저장했습니다. 켜기: discord-bot on, 트레이 메뉴 '디스코드 봇 녹음' 또는 데스크톱 설정 › 플러그인");
+        Console.WriteLine("저장했습니다. 켜기: discord-bot on|auto, 트레이 메뉴 '디스코드 봇 녹음' 또는 데스크톱 녹음 화면");
         return 0;
     }
 
+    /// <summary>discord-bot [off|on|auto]. 인자가 없으면 지금 모드·자동 목록·수집기 상태를 보여 준다.</summary>
     public static async Task<int> Bot(string arg)
     {
-        if (arg is not ("on" or "off"))
+        if (arg is not ("on" or "off" or "auto"))
         {
             var on = await CurrentSettingAsync(DiscordSettings.BotPlugin, "enabled");
-            Console.WriteLine($"봇 녹음 {(on == "true" ? "켬" : "끔")}, 토큰 {(SecretStore.Has(DiscordSettings.BotPlugin, DiscordSettings.TokenKey) ? "있음" : "없음")}");
+            var auto = await CurrentSettingAsync(DiscordSettings.BotPlugin, "auto_only");
+            var targets = await CurrentSettingAsync(DiscordSettings.BotPlugin, "auto_targets");
+            Console.WriteLine($"봇 녹음 {(on != "true" ? "꺼짐" : auto == "true" ? "자동" : "켜짐")}, 토큰 {(SecretStore.Has(DiscordSettings.BotPlugin, DiscordSettings.TokenKey) ? "있음" : "없음")}");
+            if (targets is { Length: > 2 }) Console.WriteLine($"자동 목록: {targets}");
             // 실행 중인 수집기가 2초마다 쓰는 상태(데스크톱 녹음 화면과 같은 것)
             try
             {
@@ -176,13 +180,14 @@ static class DiscordCli
             catch (Exception e) when (e is IOException or JsonException or KeyNotFoundException) { }
             return 0;
         }
-        await SetSettingAsync(DiscordSettings.BotPlugin, "enabled", JsonValue.Create(arg == "on"));
-        Console.WriteLine(arg == "on" ? "봇 녹음 켬" : "봇 녹음 끔");
+        if (arg != "off") await SetSettingAsync(DiscordSettings.BotPlugin, "auto_only", JsonValue.Create(arg == "auto"), reload: false);
+        await SetSettingAsync(DiscordSettings.BotPlugin, "enabled", JsonValue.Create(arg != "off"));
+        Console.WriteLine(arg == "on" ? "봇 녹음 켜짐(어디든 따라감)" : arg == "auto" ? "봇 녹음 자동(등록한 서버·채널에서만)" : "봇 녹음 꺼짐");
         return 0;
     }
 
     /// <summary>이 기기의 설치 설정 한 칸을 DB에 쓰고 실행 중인 수집기에 다시 읽기를 요청한다.</summary>
-    internal static async Task SetSettingAsync(string plugin, string key, JsonNode value)
+    internal static async Task SetSettingAsync(string plugin, string key, JsonNode value, bool reload = true)
     {
         var cfg = Config.Load() ?? throw new InvalidOperationException("setup을 먼저 하세요");
         await using var db = Db.Open(cfg);
@@ -190,7 +195,7 @@ static class DiscordCli
         var o = JsonNode.Parse(inst.Settings.ValueKind == JsonValueKind.Object ? inst.Settings.GetRawText() : "{}")!.AsObject();
         o[key] = value;
         await db.SetInstallAsync(plugin, cfg.Device, inst.InstalledVersion, inst.Enabled, o.ToJsonString(), JsonSerializer.Serialize(inst.Granted));
-        if (Cli.Reload()) Console.WriteLine("실행 중인 수집기에 다시 읽기를 요청했습니다");
+        if (reload && Cli.Reload()) Console.WriteLine("실행 중인 수집기에 다시 읽기를 요청했습니다");
     }
 
     internal static async Task<string?> CurrentSettingAsync(string plugin, string key)
