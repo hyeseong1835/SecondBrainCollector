@@ -41,7 +41,7 @@ $EXE autostart on        # 로그온 시 `run --tray` (시작프로그램 바로
 - `run`은 DB 코어 스키마 버전이 앱보다 높으면 쓰기를 거부한다. `autostart`는 시작프로그램 폴더에 "SecondBrain 수집기.lnk"(run --tray, 최소화)를 만든다(2026-11-14. 예전 HKCU Run 값은 Claude 세션에서 등록하면 가상화돼 실제로 안 들어갔다). 옛 Run 값은 on·off 때 지우려 하고, 남아 있으면 작업 관리자 › 시작 앱에서 끈다.
 
 ## 자료 폴더 (`%USERPROFILE%\.secondbrain\collector`, 2026-11-14)
-- config.json·secrets.json(DPAPI)·queue.db·collector.log·plugins·봇/폰 상태 파일. 대시보드 설정(`%LOCALAPPDATA%\SecondBrain\dashboard`)은 데스크톱이 실제 환경에서 쓰므로 그대로. `SECONDBRAIN_DATA_DIR`로 바꿀 수 있다(시험용).
+- config.json·secrets.json(DPAPI)·queue.db·collector.log·plugins·봇/폰 상태 파일. 대시보드 설정·데스크톱 설정·api.json도 2026-11-14에 `%USERPROFILE%\.secondbrain\{dashboard,desktop,analysis}`·`.secondbrain\api.json`으로 옮겼다(`DataAreas`, 데스크톱이 베낌. 데스크톱 README "이 PC의 설정 위치"). `SECONDBRAIN_DATA_DIR`로 바꿀 수 있다(시험용).
 - 왜 AppData가 아닌가: Claude 데스크톱 앱 셸에서 켠 프로세스는 `%LOCALAPPDATA%`를 Claude 패키지 사본(`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Local`)으로 본다.
   거기서 setup하면 설정이 사본에만 생겨 시작 메뉴·시작프로그램 바로가기·데스크톱 '수집기 켜기'로 켠 수집기는 "설정 없음"으로 꺼졌다. 사용자 프로필의 다른 폴더는 가상화되지 않는다.
 - 처음 실행 때 옛 위치(실제 `%LOCALAPPDATA%\SecondBrain\collector` → Claude 사본 → 옛 `LifeLog\collector`)에서 설정 있는 곳을 골라 베낀다. 원본은 그대로 두고 `MOVED-TO.txt`, 새 폴더에 `migrated-from.txt`를 남긴다.

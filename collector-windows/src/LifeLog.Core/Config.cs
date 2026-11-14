@@ -15,10 +15,11 @@ public sealed class Config
     public static string AppName { get; set; } = "collector";
     private static string LocalAppData => LocalPaths.LocalAppData;
     /// <summary>
-    /// 대시보드 자료 폴더의 부모 %LOCALAPPDATA%\SecondBrain(dashboard). 2026-11-11 SecondBrain로 이름을 바꾸기 전에는 %LOCALAPPDATA%\LifeLog였다.
-    /// 수집기 폴더는 여기 없다: <see cref="CollectorDir"/>.
+    /// 자료 폴더의 부모 %USERPROFILE%\.secondbrain(<see cref="DataRoot.Path"/>, 2026-11-14). 그 아래 collector·dashboard·desktop·analysis.
+    /// 그 전에는 %LOCALAPPDATA%\SecondBrain(2026-11-11 이름을 바꾸기 전에는 %LOCALAPPDATA%\LifeLog)였다. 옛 대시보드 폴더는
+    /// 데스크톱이 <see cref="DataAreas.MigrateAll"/>로 베껴 온다.
     /// </summary>
-    public static string Root { get; } = Path.Combine(LocalAppData, "SecondBrain");
+    public static string Root => DataRoot.Path;
     public static string OldRoot { get; } = Path.Combine(LocalAppData, "LifeLog");
 
     /// <summary>
@@ -28,17 +29,10 @@ public sealed class Config
     public static string CollectorDir { get { DataRoot.EnsureMigrated(); return DataRoot.CollectorDir; } }
 
     /// <summary>
-    /// 옛 대시보드 폴더(LifeLog\dashboard)를 새 곳으로 옮긴다. 새 곳에 이미 있으면 건드리지 않는다.
-    /// 수집기 폴더는 <see cref="DataRoot.EnsureMigrated"/>가 옮긴다(옛 LifeLog\collector도 후보).
+    /// 예전: 옛 대시보드 폴더(LifeLog\dashboard)를 Root\dashboard로 옮겼다. 2026-11-14부터 대시보드 폴더는 데스크톱이
+    /// <see cref="DataAreas.MigrateAll"/>로 (실제 AppData → Claude 사본 → LifeLog 순으로) 베껴 오므로 아무것도 하지 않는다. 옛 호출자를 위해 남긴다.
     /// </summary>
-    public static void MoveFromOldRoot()
-    {
-        var from = Path.Combine(OldRoot, "dashboard");
-        var to = Path.Combine(Root, "dashboard");
-        if (!Directory.Exists(from) || Directory.Exists(to)) return;
-        Directory.CreateDirectory(Root);
-        Directory.Move(from, to);
-    }
+    public static void MoveFromOldRoot() { }
     public static string Dir => AppName == "collector" ? CollectorDir : Path.Combine(Root, AppName);
     public static string PluginsDir => Path.Combine(Dir, "plugins");
     public static string QueuePath => Path.Combine(Dir, "queue.db");

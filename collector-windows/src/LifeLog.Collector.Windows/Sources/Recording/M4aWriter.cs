@@ -102,7 +102,7 @@ public static class Ffmpeg
     {
         var env = Environment.GetEnvironmentVariable("SECONDBRAIN_FFMPEG");
         if (!string.IsNullOrEmpty(env) && File.Exists(env)) return env;
-        var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SecondBrain", "analysis", "ffmpeg");
+        var dir = System.IO.Path.Combine(LifeLog.Core.DataAreas.AnalysisToolsDir, "ffmpeg");   // 실제 AppData → Claude 사본 순(2026-11-14)
         if (Directory.Exists(dir))
         {
             var f = Directory.EnumerateFiles(dir, "ffmpeg.exe", SearchOption.AllDirectories).FirstOrDefault();

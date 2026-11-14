@@ -27,6 +27,23 @@ class RunLockTests(unittest.TestCase):
         self.assertTrue(L.pid_alive(os.getpid()))
         self.assertFalse(L.pid_alive(0))
 
+    def test_read_sees_live_legacy_lock(self):
+        """옛 자리(%LOCALAPPDATA%)의 잠금은 그 PID가 살아 있을 때만 '돌고 있음'으로 본다(2026-11-14 잠금을 .secondbrain으로 옮김)."""
+        import tempfile, json
+        with tempfile.TemporaryDirectory() as d:
+            old = L.LOCK, L.LEGACY_LOCK
+            L.LOCK, L.LEGACY_LOCK = Path(d) / "new" / "analyze.lock", Path(d) / "analyze.lock"
+            try:
+                self.assertIsNone(L.read())
+                L.LEGACY_LOCK.write_text(json.dumps({"pid": 0}), encoding="utf-8")
+                self.assertIsNone(L.read())                  # 죽은 PID
+                L.LEGACY_LOCK.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+                self.assertEqual(L.read()["pid"], os.getpid())
+                L.release()                                  # 옛 자리는 지우지 않는다
+                self.assertTrue(L.LEGACY_LOCK.exists())
+            finally:
+                L.LOCK, L.LEGACY_LOCK = old
+
     def test_set_plan_only_own_lock(self):
         import tempfile, json
         with tempfile.TemporaryDirectory() as d:
