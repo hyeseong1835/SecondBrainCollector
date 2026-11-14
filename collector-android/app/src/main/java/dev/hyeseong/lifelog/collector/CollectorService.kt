@@ -118,7 +118,14 @@ class CollectorService : Service() {
                 // 옛 schema_version 테이블도: 버전을 올리기 전에 큐에 쌓인 행(stop에서 닫은 구간 등)이 남아 있을 수 있다
                 for (t in db.collectorTables(m.id)) tables[t.table] = t
                 for (o in m.outputs) tables[m.tableName(o)] = TableMeta(m.tableName(o), o.isSpan, o.columns)
-                val inst = db.getInstall(m.id, cfg.device) ?: continue
+                var inst = db.getInstall(m.id, cfg.device) ?: continue
+                // 2026-11-15: 앱에 묶인 플러그인이 등록된 설치보다 새 버전이면 설치 버전을 올린다(값·켬·권한 그대로).
+                // 새 설정 키(예: phone-notification latest_only_packages)는 설치된 버전의 매니페스트에 있어야 서버가 받는다
+                if (inst.installedVersion != m.version) try {
+                    db.setInstall(m.id, cfg.device, m.version, inst.enabled, inst.settings.toString(), JSONArray(inst.granted.toList()).toString())
+                    log(this, "[${m.id}] 설치 버전 ${inst.installedVersion} → ${m.version}")
+                    inst = db.getInstall(m.id, cfg.device) ?: inst
+                } catch (e: Exception) { log(this, "[${m.id}] 설치 버전 올리기 실패: ${e.message}") }
                 installs[m.id] = inst
                 if (!inst.enabled) { log(this, "[${m.id}] 꺼져 있음"); continue }
                 // 필수 소스가 이 호스트에 없으면 못 돌린다. 선택 소스(예: read:shealth)는 has()로 플러그인이 확인한다
@@ -150,6 +157,22 @@ class CollectorService : Service() {
         }
         tick(60_000L) { spans.tick(db.now()) }
         tick(300_000L) { scope.launch { try { db.touchLastSeen(cfg.device) } catch (_: Exception) {} } }
+        // 설정 다시 읽기(2026-11-15): 웹에서 바꾼 설치 설정(예: 알림 줄이기)을 5분 안에 반영. ctx.settings는 매번 installs에서 읽는다
+        tick(300_000L) {
+            val ids = installs.keys.toList()
+            scope.launch {
+                for (id in ids) try {
+                    val fresh = db.getInstall(id, cfg.device) ?: continue
+                    handler.post {
+                        val old = installs[id]
+                        if (old == null || old.settings.toString() != fresh.settings.toString() || old.enabled != fresh.enabled) {
+                            installs[id] = fresh
+                            if (old != null && old.settings.toString() != fresh.settings.toString()) log(this@CollectorService, "[$id] 설정 다시 읽음")
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
         status = "수집 중 · 플러그인 ${plugins.size}개"
         getSystemService(NotificationManager::class.java).notify(1, notification(status))
     }
