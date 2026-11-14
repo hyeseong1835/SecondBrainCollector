@@ -1,8 +1,8 @@
 <!doctype html>
 <html lang="ko"><head><meta charset="utf-8">
 <style>
-  :root { --fg:#ddd; --mute:#888; --line:#2a2a2a; --track:#262626; --band:rgba(100,170,255,.22); --med:#64aaff; color-scheme: dark; }
-  :root[data-theme="light"] { --fg:#1c1c1e; --mute:#6b6b70; --line:#dcdce0; --track:#ececef; --band:rgba(30,110,220,.16); --med:#1e6edc; color-scheme: light; }
+  :root { --fg:#ddd; --mute:#888; --line:#2a2a2a; --track:#262626; color-scheme: dark; }
+  :root[data-theme="light"] { --fg:#1c1c1e; --mute:#6b6b70; --line:#dcdce0; --track:#ececef; color-scheme: light; }
   html, body { height:100%; }
   body { margin:0; padding:8px 12px 6px; font: 11px/1.35 "Segoe UI Variable", "Segoe UI", sans-serif; color:var(--fg); background:transparent; box-sizing:border-box; overflow:hidden; }
   #root { display:flex; flex-direction:column; height:100%; }
@@ -16,36 +16,45 @@
   .chart svg { position:absolute; inset:0; width:100%; height:100%; }
   text { fill:var(--mute); font-size:10px; }
   .legend { display:flex; flex-wrap:wrap; gap:2px 10px; color:var(--mute); margin-top:2px; }
-  .dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:4px; vertical-align:middle; }
+  .bar { display:inline-block; width:110px; height:8px; border-radius:3px; }
 </style></head>
 <body><div id="root" class="mute">불러오는 중…</div>
 <script src="https://app.lifelog/sdk.js"></script>
 <script>
-// 폰↔노트북 거리. win-phone-link/proximity 구간을 색 띠로, win-phone-link/rssi(저수준 요약)를 중앙값 선 + 최소~최대 띠로.
-// 점선은 1m·5m 경계에 해당하는 RSSI(ref − 10·n·log10(d)). 60초 넘게 비면 선을 끊는다.
+// 폰↔노트북 거리. win-phone-link/rssi(저수준 요약)를 신호 세기 색 띠(빨강=멀다 → 초록=가깝다 연속 그라데이션)와 중앙값 선 + 최소~최대 띠로.
+// 거리를 구간(붙어 있음·같은 방 등)으로 나누지 않는다. ref·n은 "약 몇 m" 추정에만 쓴다. 60초 넘게 비면 끊는다.
+// 색 양 끝은 웹 src/lib/signal.ts · 데스크톱 Native/Signal.cs와 같다.
 const S = LifeLogSdk;
-const ZONE = { touching: ["붙어 있음 ≤1m", "#30d158"], room: ["같은 방 ≤5m", "#64aaff"], near: ["근처(신호 있음)", "#ff9f0a"], disconnected: ["연결 없음", "#8e8e93"] };
+const FAR = -85, NEAR = -45;
+const hue = f => Math.round(130 * Math.min(1, Math.max(0, f)));
+const color = v => `hsl(${hue((v - FAR) / (NEAR - FAR))}, 72%, 48%)`;
+const STOPS = [0, 0.25, 0.5, 0.75, 1].map(f => [f, `hsl(${hue(f)}, 72%, 48%)`]);
 async function q(view, opts) { try { return (await lifelog.query(view, opts)).rows; } catch (e) { return []; } }
 
 lifelog.ready(async (range, widget) => {
   const st = widget.settings || {};
   const ref = typeof st.ref_rssi_1m === "number" ? st.ref_rssi_1m : -53, n = typeof st.path_loss_n === "number" && st.path_loss_n > 0 ? st.path_loss_n : 2.5;
+  const dist = v => { const m = Math.pow(10, (ref - v) / (10 * n)); return m < 10 ? Math.round(m * 10) / 10 + "m" : Math.round(m) + "m"; };
   const root = document.getElementById("root");
-  const S0 = S.ms(range.start), E0 = S.ms(range.end), span = E0 - S0, now = Math.min(Date.now(), E0);
-  const prox = S.clip((await q("win-phone-link/proximity", { range, limit: 20000 })).map(r => Object.assign({}, r, { end: r.end || new Date(now).toISOString() })), range.start, range.end);
+  const S0 = S.ms(range.start), E0 = S.ms(range.end), span = E0 - S0;
   const rssi = (await q("win-phone-link/rssi", { range, limit: 50000 })).filter(r => r.rssi_median != null).sort((a, b) => S.ms(a.time) - S.ms(b.time));
-  if (!prox.length && !rssi.length) { root.textContent = "거리 기록 없음 (노트북 win-phone-link · 폰 phone-laptop-link가 켜져 있어야 한다)"; return; }
+  if (!rssi.length) { root.textContent = "거리 기록 없음 (노트북 win-phone-link · 폰 phone-laptop-link가 켜져 있어야 한다)"; return; }
   root.className = "";
 
-  // 구간별 시간
-  const by = {}; for (const r of prox) by[r.zone] = (by[r.zone] || 0) + r.e - r.s;
-  const last = prox.length ? prox.reduce((a, b) => (b.s > a.s ? b : a)) : null;
-  let stats = last ? `<div><b style="color:${(ZONE[last.zone] || [])[1]}">${(ZONE[last.zone] || [last.zone])[0]}</b><span>${last.distance_m != null ? "약 " + last.distance_m + "m · " : ""}${S.fmtTime(last.s)}부터</span></div>` : "";
-  for (const z of Object.keys(ZONE)) if (by[z]) stats += `<div><b>${S.fmtDur(by[z])}</b><span>${ZONE[z][0]}</span></div>`;
-  const lane = prox.map(r => `<div class="seg" title="${(ZONE[r.zone] || [r.zone])[0]} ${S.fmtTime(r.s)}–${S.fmtTime(r.e)} (${S.fmtDur(r.e - r.s)})${r.rssi_median != null ? ` · RSSI 중앙값 ${r.rssi_median} (${r.rssi_min}~${r.rssi_max}) · 약 ${r.distance_m}m · ${r.samples}개 · 신뢰도 ${r.confidence}` : ""}"
-    style="left:${(r.s - S0) / span * 100}%;width:${(r.e - r.s) / span * 100}%;background:${(ZONE[r.zone] || [, "#555"])[1]}"></div>`).join("");
+  // 색 띠 조각: 각 줄은 직전 줄~이 줄을 덮는다(60초 넘게 비면 10초만). 같은 dBm이 이어지면 합친다
+  const blocks = []; let prev = null;
+  for (const r of rssi) {
+    const t = S.ms(r.time), s = prev != null && t - prev <= 60e3 ? prev : t - 10e3, v = Math.round(r.rssi_median), lb = blocks[blocks.length - 1];
+    if (lb && lb.e === s && lb.v === v) lb.e = t; else blocks.push({ s, e: t, v });
+    prev = t;
+  }
+  const last = rssi[rssi.length - 1], on = blocks.reduce((a, b) => a + Math.min(b.e, E0) - Math.max(b.s, S0), 0);
+  const stats = `<div><b style="color:${color(last.rssi_median)}">${Math.round(last.rssi_median)} dBm</b><span>약 ${dist(last.rssi_median)} · ${S.fmtTime(S.ms(last.time))}</span></div><div><b>${S.fmtDur(on)}</b><span>신호 잡힌 시간</span></div>`;
+  const lane = blocks.map(b => `<div class="seg" title="${S.fmtTime(b.s)}–${S.fmtTime(b.e)} (${S.fmtDur(b.e - b.s)}) · RSSI ${b.v} dBm · 약 ${dist(b.v)}"
+    style="left:${(b.s - S0) / span * 100}%;width:${(b.e - b.s) / span * 100}%;background:${color(b.v)}"></div>`).join("");
+  const grad = `linear-gradient(to right, ${STOPS.map(([f, c]) => `${c} ${f * 100}%`).join(", ")})`;
   root.innerHTML = `<div class="stats">${stats}</div><div class="track">${lane}</div><div class="chart"></div>
-    <div class="legend">${Object.values(ZONE).map(([l, c]) => `<span><span class="dot" style="background:${c}"></span>${l}</span>`).join("")}<span>— RSSI 중앙값 · 띠 최소~최대 · 점선 1m/5m</span></div>`;
+    <div class="legend" style="align-items:center"><span>${FAR} dBm · 멀다(약 ${dist(FAR)})</span><span class="bar" style="background:${grad}"></span><span>${NEAR} dBm · 가깝다(약 ${dist(NEAR)})</span><span>— RSSI 중앙값 · 띠 최소~최대</span></div>`;
 
   const chart = root.querySelector(".chart");
   const W = Math.max(200, chart.clientWidth || 600), H = Math.max(80, chart.clientHeight || 160), L = 30, R = 6, T = 4, B = 16, pw = W - L - R, ph = H - T - B;
@@ -54,18 +63,16 @@ lifelog.ready(async (range, widget) => {
   const X = t => L + (t - S0) / span * pw, Y = v => T + (hi - v) / (hi - lo) * ph;
   let svg = `<svg viewBox="0 0 ${W} ${H}">`;
   for (let v = lo; v <= hi; v += 10) svg += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--line)"/><text x="${L - 4}" y="${Y(v) + 3}" text-anchor="end">${v}</text>`;
-  for (const [d, c] of [[1, ZONE.touching[1]], [5, ZONE.room[1]]]) {
-    const v = ref - 10 * n * Math.log10(d);
-    if (v > lo && v < hi) svg += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="${c}" stroke-dasharray="4 4"><title>${d}m ≈ ${v.toFixed(0)} dBm</title></line>`;
-  }
+  // 선·띠 색 = 그 높이의 신호 세기 색(위 초록 → 아래 빨강)
+  svg += `<defs><linearGradient id="sig" gradientUnits="userSpaceOnUse" x1="0" x2="0" y1="${Y(FAR)}" y2="${Y(NEAR)}">${STOPS.map(([f, c]) => `<stop offset="${f}" stop-color="${c}"/>`).join("")}</linearGradient></defs>`;
   // 60초 넘게 빈 곳에서 끊어 조각별로 띠·선
   const parts = []; let cur = [];
   for (const r of rssi) { const t = S.ms(r.time); if (cur.length && t - S.ms(cur[cur.length - 1].time) > 60e3) { parts.push(cur); cur = []; } cur.push(r); }
   if (cur.length) parts.push(cur);
   for (const p of parts) {
     const top = p.map(r => ({ x: X(S.ms(r.time)), y: Y(r.rssi_max) })), bot = p.map(r => ({ x: X(S.ms(r.time)), y: Y(r.rssi_min) })).reverse();
-    svg += `<path d="${S.chart.line(top.concat(bot))}Z" fill="var(--band)" stroke="none"/>`;
-    svg += `<path d="${S.chart.line(p.map(r => ({ x: X(S.ms(r.time)), y: Y(r.rssi_median) })))}" fill="none" stroke="var(--med)" stroke-width="1.3"/>`;
+    svg += `<path d="${S.chart.line(top.concat(bot))}Z" fill="url(#sig)" fill-opacity=".22" stroke="none"/>`;
+    svg += `<path d="${S.chart.line(p.map(r => ({ x: X(S.ms(r.time)), y: Y(r.rssi_median) })))}" fill="none" stroke="url(#sig)" stroke-width="1.5"/>`;
   }
   // 눈금: 하루면 6시간(오전·오후), 짧은 범위면 15분~2시간 간격 시각
   const stepH = span > 18 * 3600e3 ? 6 : span > 6 * 3600e3 ? 2 : span > 2 * 3600e3 ? 0.5 : 0.25, step = stepH * 3600e3;
