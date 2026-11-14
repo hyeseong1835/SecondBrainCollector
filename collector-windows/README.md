@@ -40,6 +40,16 @@ $EXE autostart on        # 로그온 시 `run --tray` (작업 스케줄러)
 - `install`은 폴더·zip·GitHub URL을 `plugins/<id>`로 복사하고 `register_plugin`을 부른다(`LifeLog.Core/PluginInstaller.cs`, 대시보드와 공용). URL이면 등록부 `plugins.source_url`에 적는다(0006). 실행 중인 수집기가 있으면 reload 신호를 보내 호스트만 새로 만든다(트레이·뮤텍스 유지). `--grant-all`이 없으면 꺼진 채 설치되고 `enable <id>`로 켠다(지금은 권한 전부 허용. 항목별 허용 UI는 대시보드 몫).
 - `run`은 DB 코어 스키마 버전이 앱보다 높으면 쓰기를 거부한다. `autostart`는 HKCU Run 키를 쓴다(관리자 권한 불필요).
 
+## 확인 스크립트 (`scriptserify.ps1`, 저장소 맨 위, 2026-11-14)
+수집기 끄기(정상 종료) → `dotnet build collector-windows` → 바로가기로 실행 → 새 PID의 `수집기 시작(pid N` 로그 줄 대기 → 한 화면 요약. 종료 코드 0 통과, 1 실패.
+```powershell
+powershell -ExecutionPolicy Bypass -File scriptserify.ps1            # 전체
+powershell -ExecutionPolicy Bypass -File scriptserify.ps1 -NoLaunch  # 빌드만(수집기는 그대로)
+powershell -ExecutionPolicy Bypass -File scriptserify.ps1 -Restore   # 빌드 없이 주 체크아웃 수집기로 다시 켜기
+```
+- 워크트리에서는 먼저 빌드하고, 성공하면 수집기를 끄고 워크트리 exe를 임시 바로가기로 띄운다(시작 메뉴·HKCU Run은 그대로). 되돌리기는 `-Restore`.
+- 바로가기로 띄운 프로세스가 곧 끝나면 같은 exe를 직접 `run --tray`로 띄우고 '주의'로 남긴다. 이 노트북에서는 수집기 설정이 Claude 앱 셸에서만 보여 셸 밖에서 뜬 수집기가 "설정 없음"으로 끝났다(2026-11-14).
+
 ## 디스코드 녹음 (2026-11-11)
 - 상시: `discord-devices`로 렌더 장치를 보고 `discord-device "CABLE Input"`으로 정한다(ID로 저장). 플러그인 `win-discord-output`.
   소리 있는 구간만 `%USERPROFILE%\SecondBrainRecordings\discord-output\날짜\*.m4a`(폰 녹음과 같은 구간 규칙). 열은 phone-audio와 같다.
