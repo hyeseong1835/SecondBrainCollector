@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO.Compression;
 using System.Text.Json;
 using LifeLog.Core;
@@ -54,11 +54,13 @@ static class Cli
           phone-link-calibrate [초] [--at 거리m]   폰을 노트북에서 거리m(기본 1)에 두고 실행. 실행 중인 수집기가 받은 RSSI 중앙값으로
                                    기준 RSSI(ref_rssi_1m)를 정한다
 
-        로그: %LOCALAPPDATA%\SecondBrain\collector\collector.log (옛 %LOCALAPPDATA%\LifeLog\collector는 처음 실행 때 옮긴다)
+        자료·로그: %USERPROFILE%\.secondbrain\collector (config.json·secrets.json·queue.db·collector.log). 환경 변수 SECONDBRAIN_DATA_DIR로 바꿀 수 있다
+                옛 %LOCALAPPDATA%\SecondBrain\collector·LifeLog\collector와 Claude 앱 패키지 사본(%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Local\...)은
+                처음 실행 때 베껴 온다(원본은 그대로). 2026-11-14: Claude 앱 셸에서 쓴 AppData가 사본에만 남아 바로가기로 켠 수집기가 설정을 못 찾았다
         """;
 
     const string StopEventName = @"Local\SecondBrain.Collector.Stop";
-    const string MutexName = @"Local\SecondBrain.Collector.Running";
+    const string MutexName = DataRoot.CollectorMutexName;
     const string ReloadEventName = @"Local\SecondBrain.Collector.Reload";   // 데스크톱(LifeLogBridge)도 이 이름을 쓴다
 
     public static async Task<int> RunAsync(string[] args)
@@ -174,7 +176,7 @@ static class Cli
     {
         var src = a.Length > 0 ? a[0] : throw new ArgumentException("플러그인 폴더·zip·GitHub URL이 필요합니다");
         var grantAll = a.Contains("--grant-all");
-        var cfg = Config.Load() ?? throw new InvalidOperationException("setup을 먼저 하세요");
+        var cfg = Config.Load() ?? throw new InvalidOperationException(Config.MissingHint());
         await using var db = Db.Open(cfg);
         var r = await PluginInstaller.InstallAsync(db, cfg.Device, Config.PluginsDir, src, grantAll, "collector");
         Console.WriteLine($"등록: {r.Registered}");
@@ -185,7 +187,7 @@ static class Cli
 
     static async Task<int> EnableAsync(string id, bool on)
     {
-        var cfg = Config.Load() ?? throw new InvalidOperationException("setup을 먼저 하세요");
+        var cfg = Config.Load() ?? throw new InvalidOperationException(Config.MissingHint());
         var m = Manifest.Load(Path.Combine(Config.PluginsDir, id, "manifest.json"));
         await using var db = Db.Open(cfg);
         var inst = await db.GetInstallAsync(id, cfg.Device) ?? throw new InvalidOperationException("설치되지 않은 플러그인입니다");
@@ -197,18 +199,46 @@ static class Cli
 
     static async Task<int> RunHostAsync(bool tray)
     {
-        var cfg = Config.Load() ?? throw new InvalidOperationException("setup을 먼저 하세요");
         using var single = new Mutex(true, MutexName, out var first);
         if (!first) { Console.Error.WriteLine("이미 실행 중입니다. `stop`으로 끝내세요."); return 3; }
-        Host.AppendLog($"수집기 시작(pid {Environment.ProcessId}{(tray ? ", 트레이" : "")})");
+        // 옛 위치(AppData·Claude 앱 사본·LifeLog)에서 베끼는 일은 뮤텍스를 쥔 수집기 run만 한다(DataRoot.MigrationEnabled)
+        DataRoot.OwnsCollectorLock = true;
+        DataRoot.MigrationEnabled = true;
+        DataRoot.EnsureMigrated();
+        Host.AppendLog($"수집기 시작(pid {Environment.ProcessId}{(tray ? ", 트레이" : "")}) · {DataRoot.Describe()}");
+        foreach (var m in DataRoot.Migrations)
+            Host.AppendLog(m.Error is null ? $"자료 폴더 옮김: {m.From} → {m.To}, 파일 {m.Files}개(원본은 그대로)"
+                                           : $"자료 폴더 옮기기 실패: {m.From} → {m.To}: {m.Error}");
+        var cfg = Config.Load();
+        // 설정이 없으면 예전에는 바로 꺼졌다(트레이 모드는 콘솔이 숨겨져 아무 흔적이 없었다, 2026-11-14 시작 메뉴 바로가기로 안 켜짐).
+        // 트레이 모드면 아이콘에 "설정 없음"을 띄우고 기다린다. 콘솔 모드는 그대로 오류로 끝낸다.
+        if (cfg is null && !tray) throw new InvalidOperationException(Config.MissingHint());
         using var stop = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
         using var stopEvent = new EventWaitHandle(false, EventResetMode.ManualReset, StopEventName);
         using var reloadEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ReloadEventName);
         ThreadPool.RegisterWaitForSingleObject(stopEvent, (_, _) => stop.Cancel(), null, -1, true);
         var status = "시작 중";
-        using var trayIcon = tray ? new Tray(() => status, () => stop.Cancel()) : null;
+        using var trayIcon = tray ? new Tray(() => status, () => stop.Cancel(), () => reloadEvent.Set()) : null;
         trayIcon?.Start();
+        if (cfg is null)
+        {
+            var hint = Config.MissingHint();
+            Host.AppendLog("설정 없음 · " + hint + " 트레이에서 기다린다(30초마다·'다시 시도' 때 다시 읽음)");
+            status = "설정 없음 · 메뉴에서 '설정 폴더 열기'";
+            trayIcon?.ShowProblem("SecondBrain 수집기: 설정 없음", hint);
+            while (cfg is null && !stop.IsCancellationRequested)
+            {
+                await Task.Run(() => WaitHandle.WaitAny([reloadEvent, stopEvent, stop.Token.WaitHandle], TimeSpan.FromSeconds(30)));
+                if (stop.IsCancellationRequested) break;
+                DataRoot.EnsureMigrated();
+                try { cfg = Config.Load(); }
+                catch (Exception e) when (e is InvalidOperationException or UnauthorizedAccessException or IOException) { status = "설정 읽기 실패 · " + e.Message; }
+            }
+            if (cfg is null) return 0;
+            Host.AppendLog("설정을 찾아 수집을 시작한다");
+            trayIcon?.ShowProblem(null, null);
+        }
         // reload 신호(install·대시보드)가 오면 호스트만 새로 만든다. 뮤텍스·트레이는 유지.
         // 호스트가 실패하면(부팅 직후 네트워크·API가 아직 없음 등) 끝내지 않고 로그를 남긴 뒤 기다렸다 다시 띄운다.
         // 예전에는 여기서 예외가 나면 숨은 콘솔에만 쓰고 끝나, 재부팅 뒤 자동 실행이 로그 없이 꺼져 있었다(2026-11-14).
@@ -245,7 +275,7 @@ static class Cli
 
     static int SetTenant(string tenant)
     {
-        var cfg = Config.Load() ?? throw new InvalidOperationException("setup을 먼저 하세요");
+        var cfg = Config.Load() ?? throw new InvalidOperationException(Config.MissingHint());
         cfg.Tenant = tenant;
         cfg.Save();
         Console.WriteLine(string.IsNullOrEmpty(tenant) ? "테넌트 접미사 없음" : $"접속 사용자: {cfg.User}");
@@ -278,8 +308,9 @@ static class Cli
     static async Task<int> StatusAsync()
     {
         var cfg = Config.Load();
-        if (cfg is null) { Console.WriteLine("설정 없음. setup을 먼저 하세요"); return 1; }
+        if (cfg is null) { Console.WriteLine(Config.MissingHint() + Environment.NewLine + DataRoot.Describe()); return 1; }
         Console.WriteLine(cfg.UsesApi ? $"기기 {cfg.Device}  API {cfg.ApiUrl}" : $"기기 {cfg.Device}  DB {cfg.Host}:{cfg.Port}/{cfg.Database}  사용자 {cfg.User}");
+        Console.WriteLine(DataRoot.Describe());
         using (var q = new Queue(Config.QueuePath)) Console.WriteLine($"큐 대기 {q.Count()}건");
         if (Directory.Exists(Config.PluginsDir))
         {

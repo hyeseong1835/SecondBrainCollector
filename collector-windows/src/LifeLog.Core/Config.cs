@@ -6,40 +6,45 @@ using System.Text.Json.Serialization;
 namespace LifeLog.Core;
 
 /// <summary>
-/// 수집기 앱 설정. %LOCALAPPDATA%\LifeLog\collector\config.json.
+/// 수집기 앱 설정. %USERPROFILE%\.secondbrain\collector\config.json(<see cref="DataRoot"/>).
 /// 기기 롤 비밀번호는 DPAPI(현재 사용자)로 암호화해 둔다. 관리자 접속 정보는 저장하지 않는다(Documents/인증·권한.md 3절).
 /// </summary>
 public sealed class Config
 {
     /// <summary>앱 이름. 수집기는 "collector", 대시보드는 "dashboard". 시작 시 한 번 정한다.</summary>
     public static string AppName { get; set; } = "collector";
-    /// <summary>%LOCALAPPDATA%. 후보 경로 중 SecondBrain 폴더가 있는 곳(<see cref="LocalPaths"/>, 2026-11-14).</summary>
     private static string LocalAppData => LocalPaths.LocalAppData;
-    /// <summary>자료 폴더 %LOCALAPPDATA%\SecondBrain\{collector,dashboard}. 2026-11-11 SecondBrain로 이름을 바꾸기 전에는 %LOCALAPPDATA%\LifeLog였다.</summary>
+    /// <summary>
+    /// 대시보드 자료 폴더의 부모 %LOCALAPPDATA%\SecondBrain(dashboard). 2026-11-11 SecondBrain로 이름을 바꾸기 전에는 %LOCALAPPDATA%\LifeLog였다.
+    /// 수집기 폴더는 여기 없다: <see cref="CollectorDir"/>.
+    /// </summary>
     public static string Root { get; } = Path.Combine(LocalAppData, "SecondBrain");
     public static string OldRoot { get; } = Path.Combine(LocalAppData, "LifeLog");
 
     /// <summary>
-    /// 옛 폴더(LifeLog\collector·dashboard)를 새 곳으로 옮긴다. 새 곳에 이미 있으면 건드리지 않는다.
-    /// 옛 수집기·대시보드가 파일을 잡고 있으면 IOException(먼저 멈춘다). LifeLog\vscode(VS Code 수집기가 쓰는 곳)는 그대로 둔다.
+    /// 수집기 자료 폴더 %USERPROFILE%\.secondbrain\collector(<see cref="DataRoot"/>, 2026-11-14). 그 전에는 %LOCALAPPDATA%\SecondBrain\collector였다.
+    /// Claude 앱 셸에서 쓴 AppData가 패키지 사본에만 남아 바로가기로 켠 수집기가 설정을 못 찾았다. 옛 위치에서 베끼는 일은 수집기 run만 한다.
+    /// </summary>
+    public static string CollectorDir { get { DataRoot.EnsureMigrated(); return DataRoot.CollectorDir; } }
+
+    /// <summary>
+    /// 옛 대시보드 폴더(LifeLog\dashboard)를 새 곳으로 옮긴다. 새 곳에 이미 있으면 건드리지 않는다.
+    /// 수집기 폴더는 <see cref="DataRoot.EnsureMigrated"/>가 옮긴다(옛 LifeLog\collector도 후보).
     /// </summary>
     public static void MoveFromOldRoot()
     {
-        foreach (var app in new[] { "collector", "dashboard" })
-        {
-            var from = Path.Combine(OldRoot, app);
-            var to = Path.Combine(Root, app);
-            if (!Directory.Exists(from) || Directory.Exists(to)) continue;
-            Directory.CreateDirectory(Root);
-            Directory.Move(from, to);
-        }
+        var from = Path.Combine(OldRoot, "dashboard");
+        var to = Path.Combine(Root, "dashboard");
+        if (!Directory.Exists(from) || Directory.Exists(to)) return;
+        Directory.CreateDirectory(Root);
+        Directory.Move(from, to);
     }
-    public static string Dir => Path.Combine(Root, AppName);
+    public static string Dir => AppName == "collector" ? CollectorDir : Path.Combine(Root, AppName);
     public static string PluginsDir => Path.Combine(Dir, "plugins");
     public static string QueuePath => Path.Combine(Dir, "queue.db");
     private static string FilePath => Path.Combine(Dir, "config.json");
     /// <summary>수집기 설정 파일(진단 화면용). 대시보드도 이 파일을 먼저 본다.</summary>
-    public static string CollectorConfigPath => Path.Combine(Root, "collector", "config.json");
+    public static string CollectorConfigPath => Path.Combine(CollectorDir, "config.json");
 
     [JsonPropertyName("device")] public string Device { get; set; } = "";
     [JsonPropertyName("host")] public string Host { get; set; } = "";
@@ -76,8 +81,7 @@ public sealed class Config
     {
         var paths = new List<string> { FilePath };
         // 같은 기기의 다른 앱(수집기 ↔ 대시보드)은 같은 기기 롤을 쓴다. DPAPI가 같은 사용자라 그대로 읽힌다.
-        foreach (var other in new[] { "collector", "dashboard" })
-            if (other != AppName) paths.Add(Path.Combine(Root, other, "config.json"));
+        paths.Add(AppName == "collector" ? Path.Combine(Root, "dashboard", "config.json") : CollectorConfigPath);
         foreach (var f in paths)
         {
             var text = LocalPaths.ReadText(f);
@@ -88,12 +92,15 @@ public sealed class Config
         return null;
     }
 
-    /// <summary>설정이 없을 때 보일 글. 경로와, 샌드박스로 보이면 그 안내를 붙인다.</summary>
+    /// <summary>설정이 없을 때 보일 글. 경로와, 옛 위치에 설정이 남아 있으면 그곳과 옮기는 방법을 붙인다.</summary>
     public static string MissingHint()
     {
-        var why = LocalPaths.SandboxReason();
+        var failed = DataRoot.Migrations.LastOrDefault(m => m.Error is not null);
+        var legacy = DataRoot.FindLegacy();
         return $"수집기 설정이 없습니다({CollectorConfigPath})." +
-               (why is null ? " 수집기 setup을 먼저 하세요." : $" 샌드박스에서 실행된 것 같습니다({why}). 시작 메뉴의 SecondBrain 바로가기로 다시 켜세요.");
+               (failed is not null ? $" 옛 설정({failed.From})을 옮기지 못했습니다: {failed.Error}."
+                : legacy is not null ? $" 옛 설정({legacy})이 있습니다. 다른 수집기가 돌고 있으면 끄고(stop) `run --tray`로 다시 켜면 옮깁니다."
+                : " 수집기 setup(또는 use-api)을 먼저 하세요.");
     }
 
     public void Save() => LocalPaths.WriteTextAtomic(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));

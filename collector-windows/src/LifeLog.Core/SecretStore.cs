@@ -7,12 +7,12 @@ namespace LifeLog.Core;
 
 /// <summary>
 /// 플러그인 비밀값(봇 토큰 등) 로컬 저장소(2026-11-11). 매니페스트의 `x-secrets`([{ key, label, description? }])가 선언한 키만 쓴다.
-/// %LOCALAPPDATA%\SecondBrain\collector\secrets.json = { 플러그인id: { 키: DPAPI(현재 사용자) base64 } }.
+/// %USERPROFILE%\.secondbrain\collector\secrets.json = { 플러그인id: { 키: DPAPI(현재 사용자) base64 } }.
 /// DB·API·로그에 보내지 않는다. 같은 Windows 사용자인 수집기와 데스크톱 설정 화면이 같은 파일을 읽고 쓴다.
 /// </summary>
 public static class SecretStore
 {
-    public static string FilePath => Path.Combine(Config.Root, "collector", "secrets.json");
+    public static string FilePath => Path.Combine(Config.CollectorDir, "secrets.json");
     private static readonly object Lock = new();
 
     private static JsonObject Load()

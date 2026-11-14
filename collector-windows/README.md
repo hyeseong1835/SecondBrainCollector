@@ -6,7 +6,7 @@ Windows 수집기 앱 = 호스트 + 네이티브 소스. 수집기 플러그인�
 src/LifeLog.Core/                 공통(대시보드도 쓴다)
   Ids.cs        결정적 id. tools/import/common.py와 바이트 단위로 같다(Python isoformat·json.dumps 재현)
   Manifest.cs   매니페스트 모델. 원문 JSON을 그대로 등록 함수에 보낸다
-  Config.cs     %LOCALAPPDATA%\LifeLog\collector\config.json. 기기 롤 비밀번호는 DPAPI
+  Config.cs     %USERPROFILE%\.secondbrain\collector\config.json(DataRoot.cs). 기기 롤 비밀번호는 DPAPI
   Db.cs         등록 함수 호출, 스키마 버전 확인, 시계 보정, (device, id) upsert 배치
   Queue.cs      로컬 큐(SQLite). 같은 키의 upsert는 최신 하나만 남긴다
   Uploader.cs   큐 → DB. 실패하면 5초~2분 물러났다 재시도
@@ -40,6 +40,14 @@ $EXE autostart on        # 로그온 시 `run --tray` (시작프로그램 바로
 - `install`은 폴더·zip·GitHub URL을 `plugins/<id>`로 복사하고 `register_plugin`을 부른다(`LifeLog.Core/PluginInstaller.cs`, 대시보드와 공용). URL이면 등록부 `plugins.source_url`에 적는다(0006). 실행 중인 수집기가 있으면 reload 신호를 보내 호스트만 새로 만든다(트레이·뮤텍스 유지). `--grant-all`이 없으면 꺼진 채 설치되고 `enable <id>`로 켠다(지금은 권한 전부 허용. 항목별 허용 UI는 대시보드 몫).
 - `run`은 DB 코어 스키마 버전이 앱보다 높으면 쓰기를 거부한다. `autostart`는 시작프로그램 폴더에 "SecondBrain 수집기.lnk"(run --tray, 최소화)를 만든다(2026-11-14. 예전 HKCU Run 값은 Claude 세션에서 등록하면 가상화돼 실제로 안 들어갔다). 옛 Run 값은 on·off 때 지우려 하고, 남아 있으면 작업 관리자 › 시작 앱에서 끈다.
 
+## 자료 폴더 (`%USERPROFILE%\.secondbrain\collector`, 2026-11-14)
+- config.json·secrets.json(DPAPI)·queue.db·collector.log·plugins·봇/폰 상태 파일. 대시보드 설정(`%LOCALAPPDATA%\SecondBrain\dashboard`)은 데스크톱이 실제 환경에서 쓰므로 그대로. `SECONDBRAIN_DATA_DIR`로 바꿀 수 있다(시험용).
+- 왜 AppData가 아닌가: Claude 데스크톱 앱 셸에서 켠 프로세스는 `%LOCALAPPDATA%`를 Claude 패키지 사본(`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Local`)으로 본다.
+  거기서 setup하면 설정이 사본에만 생겨 시작 메뉴·시작프로그램 바로가기·데스크톱 '수집기 켜기'로 켠 수집기는 "설정 없음"으로 꺼졌다. 사용자 프로필의 다른 폴더는 가상화되지 않는다.
+- 처음 실행 때 옛 위치(실제 `%LOCALAPPDATA%\SecondBrain\collector` → Claude 사본 → 옛 `LifeLog\collector`)에서 설정 있는 곳을 골라 베낀다. 원본은 그대로 두고 `MOVED-TO.txt`, 새 폴더에 `migrated-from.txt`를 남긴다.
+  다른 수집기가 돌고 있으면(뮤텍스) 쓰는 중인 queue.db를 베끼지 않으려고 미룬다. 베끼기는 뮤텍스를 쥔 `run`만 한다(데스크톱·`status`·시험은 안 베낌: 옛 빌드 수집기가 옛 곳에 계속 쓰는 동안 새 폴더가 낡은 사본으로 굳지 않게).
+- 설정이 없으면 `run --tray`는 꺼지지 않고 경고 아이콘·풍선 알림("설정 없음")을 띄운 채 30초마다(또는 트레이 '다시 시도') 다시 읽는다. 시작 줄에 자료 폴더·AppData 사본 여부·옛 설정 위치를 남긴다.
+
 ## 확인 스크립트 (`scripts\verify.ps1`, 저장소 맨 위, 2026-11-14)
 수집기 끄기(정상 종료) → `dotnet build collector-windows` → 바로가기로 실행 → 새 PID의 `수집기 시작(pid N` 로그 줄 대기 → 한 화면 요약. 종료 코드 0 통과, 1 실패.
 ```powershell
@@ -56,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File scripts\verify.ps1 -Restore   # 빌드 
 - 봇: 일반 터미널에서 `discord-token`(토큰·내 사용자 ID를 직접 입력, 화면에 안 보임, DPAPI) → 트레이 "디스코드 봇 녹음" 또는 `discord-bot on`.
   내가 음성 채널에 들어가면 봇(HearingAid와 같은 봇)이 따라 들어가 사람별 파일 `discord-bot\날짜\시각-사용자ID-xxxx.m4a` + 옆 `.json`(표시 이름·서버·채널). 플러그인 `win-discord-bot`.
   모드(2026-11-13): 꺼짐 · 켜짐(어디든 따라감) · 자동(등록한 서버·채널에서만). `discord-bot off|on|auto`, 트레이 하위 메뉴, 데스크톱 녹음 화면(자동 목록 고르기).
-  설정 `enabled`·`auto_only`·`auto_targets`(`guild:ID`·`channel:ID`). 봇이 볼 수 있는 서버·음성 채널은 `%LOCALAPPDATA%\SecondBrain\collector\discord-bot-guilds.json`.
+  설정 `enabled`·`auto_only`·`auto_targets`(`guild:ID`·`channel:ID`). 봇이 볼 수 있는 서버·음성 채널은 `%USERPROFILE%\.secondbrain\collector\discord-bot-guilds.json`.
   플러그인을 다시 설치(`install ... --grant-all`)해도 이 기기의 기존 설정은 남는다.
 - AAC 인코딩은 ffmpeg(`SECONDBRAIN_FFMPEG` → `%LOCALAPPDATA%\SecondBrain\analysis\ffmpeg` → PATH). Media Foundation AAC는 16kHz·32kbps를 못 쓴다.
 - `discord-simulate <wav>`: WAV를 상시 녹음 구간 규칙에 흘려 본다(시험용, `%TEMP%\secondbrain-simulate`에 씀).

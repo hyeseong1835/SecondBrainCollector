@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using LifeLog.Core;
 using LifeLog.Collector.Windows.Sources.Recording;
 using NAudio.Dsp;
@@ -39,19 +39,19 @@ public sealed class DiscordBotSource : ISource
     public static string StatusText { get; private set; } = "꺼짐";
 
     /// <summary>
-    /// 데스크톱 녹음 화면이 읽는 상태 파일(2026-11-12). %LOCALAPPDATA%\SecondBrain\collector\discord-bot-status.json.
+    /// 데스크톱 녹음 화면이 읽는 상태 파일(2026-11-12). %USERPROFILE%\.secondbrain\collector\discord-bot-status.json.
     /// 소스가 도는 동안 2초마다 쓴다(at이 10초 넘게 오래되면 데스크톱은 수집기가 상태를 내지 않는 것으로 본다).
     /// { at, pid, enabled, mode: off|on|auto, state: off|starting|idle|recording|error, code(오류 때: no_token·no_target·no_credentials·start_failed·join_failed,
     ///   자동 대기 때: not_listed = 대상이 목록에 없는 채널에 있음, 이때 guild·channel은 그 채널), message, guild, channel, members, in_call }
     /// 토큰·사용자 ID는 넣지 않는다.
     /// </summary>
-    public static string StatusPath => Path.Combine(LifeLog.Core.Config.Root, "collector", "discord-bot-status.json");
+    public static string StatusPath => Path.Combine(LifeLog.Core.Config.CollectorDir, "discord-bot-status.json");
 
     /// <summary>
-    /// 봇이 볼 수 있는 서버와 음성 채널(2026-11-13). %LOCALAPPDATA%\SecondBrain\collector\discord-bot-guilds.json.
+    /// 봇이 볼 수 있는 서버와 음성 채널(2026-11-13). %USERPROFILE%\.secondbrain\collector\discord-bot-guilds.json.
     /// { at, guilds: [{ id, name, channels: [{ id, name, position }] }] }. ID는 문자열. 게이트웨이에 붙어 있을 때 바뀌면 쓰고, 끈 뒤에도 남겨 둔다.
     /// </summary>
-    public static string CatalogPath => Path.Combine(LifeLog.Core.Config.Root, "collector", "discord-bot-guilds.json");
+    public static string CatalogPath => Path.Combine(LifeLog.Core.Config.CollectorDir, "discord-bot-guilds.json");
     private string? _catalogWritten;
 
     private string _state = "off", _code = "", _gName = "", _chName = "";

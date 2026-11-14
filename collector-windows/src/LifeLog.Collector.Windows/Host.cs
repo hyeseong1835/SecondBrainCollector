@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Nodes;
 using Jint.Native;
 using LifeLog.Collector.Windows.Sources;
@@ -50,7 +50,8 @@ public sealed class Host : IAsyncDisposable
         try { Console.WriteLine(line); } catch (IOException) { } catch (ObjectDisposedException) { }
         lock (LogLock)
         {
-            try { File.AppendAllText(LogPath, line + Environment.NewLine); }
+            // 폴더가 없으면 만든다. 예전에는 폴더가 없어 "설정 없음" 줄조차 못 남기고 꺼졌다(2026-11-14)
+            try { Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!); File.AppendAllText(LogPath, line + Environment.NewLine); }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }
