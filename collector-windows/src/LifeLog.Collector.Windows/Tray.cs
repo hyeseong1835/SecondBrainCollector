@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using LifeLog.Collector.Windows.Sources;
 using LifeLog.Collector.Windows.Sources.Recording;

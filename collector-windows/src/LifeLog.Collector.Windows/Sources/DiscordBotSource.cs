@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using LifeLog.Core;
 using LifeLog.Collector.Windows.Sources.Recording;
 using NAudio.Dsp;
