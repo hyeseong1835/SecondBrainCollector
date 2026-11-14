@@ -189,7 +189,7 @@ static class DiscordCli
     /// <summary>이 기기의 설치 설정 한 칸을 DB에 쓰고 실행 중인 수집기에 다시 읽기를 요청한다.</summary>
     internal static async Task SetSettingAsync(string plugin, string key, JsonNode value, bool reload = true)
     {
-        var cfg = Config.Load() ?? throw new InvalidOperationException("setup을 먼저 하세요");
+        var cfg = Config.Load() ?? throw new InvalidOperationException(Config.MissingHint());
         await using var db = Db.Open(cfg);
         var inst = await db.GetInstallAsync(plugin, cfg.Device) ?? throw new InvalidOperationException($"{plugin}가 이 기기에 설치되지 않았습니다");
         var o = JsonNode.Parse(inst.Settings.ValueKind == JsonValueKind.Object ? inst.Settings.GetRawText() : "{}")!.AsObject();

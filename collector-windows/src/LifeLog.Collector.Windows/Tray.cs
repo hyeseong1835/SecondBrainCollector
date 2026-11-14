@@ -15,10 +15,15 @@ public sealed class Tray : IDisposable
     private NotifyIcon? _icon;
     private readonly Func<string> _status;
     private readonly Action _quit;
+    private readonly Action? _retry;
+    private ToolStripMenuItem? _retryItem;
+    private Control? _ui;   // UI 스레드로 넘기는 용도
+    private (string? Title, string? Text) _problem;
 
-    public Tray(Func<string> status, Action quit)
+    /// <param name="retry">설정을 다시 읽게 하는 동작(설정 없음일 때 메뉴 '다시 시도').</param>
+    public Tray(Func<string> status, Action quit, Action? retry = null)
     {
-        _status = status; _quit = quit;
+        _status = status; _quit = quit; _retry = retry;
         _thread = new Thread(Loop) { Name = "lifelog-tray", IsBackground = true };
         _thread.SetApartmentState(ApartmentState.STA);
     }
@@ -49,7 +54,9 @@ public sealed class Tray : IDisposable
         menu.Items.Add(bot);
         menu.Items.Add(botStatus);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("로그 폴더 열기", null, (_, _) => Process.Start(new ProcessStartInfo("explorer.exe", Config.Dir) { UseShellExecute = true }));
+        _retryItem = new ToolStripMenuItem("다시 시도 (설정 다시 읽기)", null, (_, _) => _retry?.Invoke()) { Visible = false };
+        menu.Items.Add(_retryItem);
+        menu.Items.Add("설정·로그 폴더 열기", null, (_, _) => { Directory.CreateDirectory(Config.Dir); Process.Start(new ProcessStartInfo("explorer.exe", Config.Dir) { UseShellExecute = true }); });
         menu.Items.Add("녹음 폴더 열기", null, (_, _) => { Directory.CreateDirectory(RecordingPaths.Root); Process.Start(new ProcessStartInfo("explorer.exe", RecordingPaths.Root) { UseShellExecute = true }); });
         menu.Items.Add("종료", null, (_, _) => _quit());
         menu.Opening += (_, _) =>
@@ -61,9 +68,36 @@ public sealed class Tray : IDisposable
             botStatus.Text = "  봇: " + DiscordBotSource.StatusText;
         };
         _icon = new NotifyIcon { Icon = SystemIcons.Application, Text = "SecondBrain Collector", Visible = true, ContextMenuStrip = menu };
+        _ui = new Control();
+        _ui.CreateControl();
+        _ = _ui.Handle;
+        ApplyProblem();
         Application.Run();
         _icon.Visible = false;
         _icon.Dispose();
+    }
+
+    /// <summary>
+    /// 문제(예: 설정 없음)를 트레이에 보인다: 경고 아이콘·툴팁·풍선 알림 한 번, 메뉴에 '다시 시도'. title이 null이면 원래대로.
+    /// 트레이 스레드가 아직 아이콘을 만들기 전이어도 된다(만든 뒤 적용).
+    /// </summary>
+    public void ShowProblem(string? title, string? text)
+    {
+        _problem = (title, text);
+        var ui = _ui;
+        if (ui is { IsHandleCreated: true }) { try { ui.BeginInvoke(ApplyProblem); } catch (InvalidOperationException) { } }
+    }
+
+    private void ApplyProblem()
+    {
+        if (_icon is null) return;
+        var (title, text) = _problem;
+        var bad = title is not null;
+        _icon.Icon = bad ? SystemIcons.Warning : SystemIcons.Application;
+        var tip = bad ? title! : "SecondBrain Collector";
+        _icon.Text = tip.Length > 63 ? tip[..63] : tip;   // NotifyIcon.Text 한도
+        if (_retryItem is not null) _retryItem.Visible = bad && _retry is not null;
+        if (bad) _icon.ShowBalloonTip(15000, title, text ?? "", ToolTipIcon.Warning);
     }
 
     public void Dispose()

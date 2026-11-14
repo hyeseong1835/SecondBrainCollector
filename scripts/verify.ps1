@@ -16,9 +16,10 @@
   시작 메뉴 바로가기·자동 실행(HKCU Run)은 바꾸지 않는다. 원래 수집기로 돌아가려면 `-Restore` 또는 시작 메뉴 바로가기.
 - 빌드가 실패하거나 중간에 멈춰도, 이 스크립트가 끈 수집기는 반드시 시작 메뉴 바로가기로 다시 켠다.
 - 실행은 explorer.exe로 바로가기를 연다. 그렇게 뜬 프로세스가 곧 끝나면(설정을 못 찾는 경우) 같은 exe를 이 셸에서 직접 `run --tray`로 띄우고 '주의'로 남긴다.
-  2026-11-14 확인: 이 노트북에서는 수집기 설정(%LOCALAPPDATA%\SecondBrain\collector)이 Claude 앱 셸에서만 보이고, 셸 밖에서 뜬 프로세스는 "설정 없음"으로 끝났다.
+  2026-11-14 확인: 수집기 설정(%LOCALAPPDATA%\SecondBrain\collector)이 Claude 앱 셸의 AppData 사본(Packages\Claude_…\LocalCache)에만 있어 셸 밖에서 뜬 프로세스는 "설정 없음"으로 끝났다.
+  그래서 자료 폴더를 %USERPROFILE%\.secondbrain\collector로 옮겼다(처음 실행 때 사본에서 베껴 옴). 이 대비책은 옛 빌드용으로 남겨 둔다.
 - 준비 확인: 새 프로세스(경로 확인)가 떠서 살아 있고, collector.log에 `수집기 시작(pid <새 PID>` 줄이 생기면 통과.
-  로그에 그 줄이 안 보이면 '주의'(Claude 셸에서는 로그가 샌드박스 사본으로 보일 수 있다). 프로세스가 없거나 곧 끝나면 실패.
+  로그에 그 줄이 안 보이면 '주의'. 프로세스가 없거나 곧 끝나면 실패.
 - 인증 정보(config.json의 비밀번호 등)는 읽지도 출력하지도 않는다.
 #>
 param(
@@ -40,7 +41,9 @@ if ($isWorktree) {
 $exeRel = 'collector-windows\src\LifeLog.Collector.Windows\bin\Debug\net10.0-windows10.0.19041.0\secondbrain-collector.exe'
 $exe = Join-Path $root $exeRel
 $menuLnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'SecondBrain\SecondBrain 수집기.lnk'
-$logPath = Join-Path $env:LOCALAPPDATA 'SecondBrain\collector\collector.log'
+# 자료 폴더는 2026-11-14부터 %USERPROFILE%\.secondbrain(Claude 앱 셸의 AppData 사본 문제로 옮김). SECONDBRAIN_DATA_DIR이 있으면 그곳
+$dataDir = if ($env:SECONDBRAIN_DATA_DIR) { $env:SECONDBRAIN_DATA_DIR } else { Join-Path $env:USERPROFILE '.secondbrain' }
+$logPath = Join-Path $dataDir 'collector\collector.log'
 $procName = 'secondbrain-collector'
 $logDir = Join-Path $env:TEMP 'secondbrain-verify'
 New-Item -ItemType Directory -Force $logDir | Out-Null
