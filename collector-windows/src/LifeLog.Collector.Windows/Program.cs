@@ -33,7 +33,7 @@ static class Cli
           run [--tray]   수집 시작. --tray면 콘솔을 숨기고 트레이 아이콘으로 돈다
           stop           실행 중인 수집기를 정상 종료시킨다(열린 구간을 닫고 큐를 비운다)
           reload             실행 중인 수집기에 플러그인 다시 읽기 요청
-          autostart on|off   로그온 시 자동 실행(HKCU Run 키)
+          autostart on|off|status   로그온 시 자동 실행(시작프로그램 폴더의 "SecondBrain 수집기" 바로가기)
           status  설정·큐·플러그인 상태
 
           디스코드 녹음(플러그인 win-discord-output·win-discord-bot. 데스크톱 설정 › 플러그인에서도 바꾼다):
@@ -60,8 +60,6 @@ static class Cli
     const string StopEventName = @"Local\SecondBrain.Collector.Stop";
     const string MutexName = @"Local\SecondBrain.Collector.Running";
     const string ReloadEventName = @"Local\SecondBrain.Collector.Reload";   // 데스크톱(LifeLogBridge)도 이 이름을 쓴다
-    const string TaskName = "SecondBrainCollector";
-    const string OldTaskName = "LifeLogCollector";
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -80,7 +78,7 @@ static class Cli
                 case "run": return await RunHostAsync(args.Contains("--tray"));
                 case "stop": return Stop();
                 case "reload": Console.WriteLine(Reload() ? "실행 중인 수집기에 플러그인 다시 읽기를 요청했습니다" : "실행 중인 수집기가 없습니다"); return 0;
-                case "autostart": return Autostart(args.Length > 1 && args[1] == "on");
+                case "autostart": return Autostart.Run(args.Length > 1 ? args[1] : null);
                 case "set-tenant": return SetTenant(args.Length > 1 ? args[1] : "");
                 case "status": return await StatusAsync();
                 case "discord-devices": return await DiscordCli.Devices(args.Contains("--json"));
@@ -275,17 +273,6 @@ static class Cli
         }
         Console.WriteLine("30초 안에 끝나지 않았습니다. 로그를 보세요");
         return 2;
-    }
-
-    static int Autostart(bool on)
-    {
-        // 작업 스케줄러의 onlogon 트리거는 관리자 권한이 필요해 HKCU Run 키를 쓴다(사용자 권한으로 충분)
-        var exe = Environment.ProcessPath ?? throw new InvalidOperationException("실행 파일 경로를 알 수 없습니다");
-        using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true)!;
-        key.DeleteValue(OldTaskName, false);   // 이름을 바꾸기 전의 자동 실행 항목
-        if (on) { key.SetValue(TaskName, $"\"{exe}\" run --tray"); Console.WriteLine($"로그온 시 자동 실행 등록(HKCU Run): {exe} run --tray"); }
-        else { key.DeleteValue(TaskName, false); Console.WriteLine("자동 실행 해제"); }
-        return 0;
     }
 
     static async Task<int> StatusAsync()

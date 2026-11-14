@@ -33,12 +33,12 @@ $EXE install plugins/win-window --grant-all      # 개발용: 권한 전부 허�
 $EXE reload              # 실행 중인 수집기에 플러그인 다시 읽기 요청(install이 자동으로 보낸다)
 $EXE run                 # 콘솔. 또는 run --tray (콘솔 숨김, 트레이 아이콘)
 $EXE stop                # 정상 종료(열린 구간 닫고 큐 비움)
-$EXE autostart on        # 로그온 시 `run --tray` (작업 스케줄러)
+$EXE autostart on        # 로그온 시 `run --tray` (시작프로그램 바로가기). off·status도 있다
 ```
 - Supabase에 붙이기(로컬 Docker DB에서 옮길 때도): 일반 PowerShell에서 `powershell -ExecutionPolicy Bypass -File tools/db/pc-setup.ps1 -ProjectRef <ref>`. 비밀번호를 프롬프트로 받아 마이그레이션 → 수집기·대시보드 끄기 → `setup-reset`(없으면 `setup`) → 수집기 시작 → `-Enable` 플러그인 켜기 → 대시보드 시작. 대시보드는 수집기 설정을 그대로 쓴다.
 - `setup`은 관리자 접속으로 `register_device`를 부르고 받은 비밀번호만 저장한다. 관리자 접속 문자열은 저장하지 않는다.
 - `install`은 폴더·zip·GitHub URL을 `plugins/<id>`로 복사하고 `register_plugin`을 부른다(`LifeLog.Core/PluginInstaller.cs`, 대시보드와 공용). URL이면 등록부 `plugins.source_url`에 적는다(0006). 실행 중인 수집기가 있으면 reload 신호를 보내 호스트만 새로 만든다(트레이·뮤텍스 유지). `--grant-all`이 없으면 꺼진 채 설치되고 `enable <id>`로 켠다(지금은 권한 전부 허용. 항목별 허용 UI는 대시보드 몫).
-- `run`은 DB 코어 스키마 버전이 앱보다 높으면 쓰기를 거부한다. `autostart`는 HKCU Run 키를 쓴다(관리자 권한 불필요).
+- `run`은 DB 코어 스키마 버전이 앱보다 높으면 쓰기를 거부한다. `autostart`는 시작프로그램 폴더에 "SecondBrain 수집기.lnk"(run --tray, 최소화)를 만든다(2026-11-14. 예전 HKCU Run 값은 Claude 세션에서 등록하면 가상화돼 실제로 안 들어갔다). 옛 Run 값은 on·off 때 지우려 하고, 남아 있으면 작업 관리자 › 시작 앱에서 끈다.
 
 ## 확인 스크립트 (`scripts\verify.ps1`, 저장소 맨 위, 2026-11-14)
 수집기 끄기(정상 종료) → `dotnet build collector-windows` → 바로가기로 실행 → 새 PID의 `수집기 시작(pid N` 로그 줄 대기 → 한 화면 요약. 종료 코드 0 통과, 1 실패.
