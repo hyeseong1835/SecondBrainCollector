@@ -100,6 +100,6 @@ powershell -ExecutionPolicy Bypass -File scripts\verify.ps1 -Restore   # 빌드 
 ## 폰 링크·거리 (2026-11-13)
 - 노트북이 BLE GATT 서버(SecondBrain 서비스 UUID `5b1e0001-…`)로 광고하고, 폰 수집기(`phone-laptop-link`, 소스 `laptop_link`)가 붙는다. 소스 `phone_link`, 플러그인 `win-phone-link`.
   폰이 2초마다 연결 RSSI를 읽어 10초마다 보내고, 5분마다 시계 차이를 잰다(잴 때만 빠른 연결로 5번, 왕복이 가장 짧은 값). 잠자기 때는 광고를 끈다.
-- 기록: `link`(붙어 있던 동안·재연결 수·clock_offset_ms = 폰 − 노트북), `proximity`(zone touching ≤1m · room ≤5m · near · disconnected, 장소 이름 없음), `rssi`(1분 요약).
-- 보정: `phone-link-calibrate [초] [--at 거리m]`(수집기가 돌고 있을 때). 기본 ref_rssi_1m −53은 S26 Ultra·이 노트북으로 잰 값. touching/room 경계(1m)는 RSSI 흔들림 때문에 오갈 수 있다.
+- 기록: `link`(붙어 있던 동안·재연결 수·clock_offset_ms = 폰 − 노트북), `rssi`(10초마다 RSSI 중앙값·최소·최대, 거리는 이것으로만 보인다. 옛 `proximity` 거리 구간 출력은 2026-11-15에 없앴고 저장된 행은 남는다). 장소 이름 없음.
+- 보정: `phone-link-calibrate [초] [--at 거리m]`(수집기가 돌고 있을 때). 기본 ref_rssi_1m −53은 S26 Ultra·이 노트북으로 잰 값. 화면의 "약 몇 m" 추정에만 쓴다.
 - 시험: `phone-link-test [초]`(DB 없이 소스만, 이벤트를 찍음).
