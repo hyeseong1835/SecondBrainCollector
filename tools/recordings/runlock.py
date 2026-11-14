@@ -1,6 +1,6 @@
 """analyze.py 동시 실행 막기(2026-11-11). 데스크톱 녹음 화면(Native/AnalyzeRunner.cs)도 같은 잠금 파일·같은 프로세스 판정을 쓴다.
 
-- 잠금 파일: %LOCALAPPDATA%/SecondBrain/analysis/analyze.lock = {"pid", "started", "args"} JSON. 끝나면 지운다.
+- 잠금 파일: %USERPROFILE%/.secondbrain/analysis/analyze.lock(2026-11-14, 옛 %LOCALAPPDATA%/SecondBrain/analysis/analyze.lock도 읽는다) = {"pid", "started", "args"} JSON. 끝나면 지운다.
   죽은 PID(취소·강제 종료로 남은 파일)는 낡은 잠금으로 보고 덮어쓴다.
 - 잠금을 모르는 옛 analyze.py(앱 밖에서 이미 돌던 것)도 막도록, 명령줄에 analyze.py가 든 python 프로세스를 함께 본다(자기와 조상 제외).
 - --plan은 잠그지 않는다(분석하지 않으므로).
@@ -9,8 +9,11 @@
 """
 import ctypes, datetime as dt, json, os, subprocess, sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+import sbpaths
 
-LOCK = Path(os.environ.get("LOCALAPPDATA", ".")) / "SecondBrain" / "analysis" / "analyze.lock"
+LOCK = sbpaths.ANALYSIS / "analyze.lock"
+LEGACY_LOCK = sbpaths.LEGACY_ANALYSIS / "analyze.lock"   # 옛 빌드(앱·스크립트)가 쓰던 자리. 돌고 있나만 본다
 
 
 def pid_alive(pid: int) -> bool:
@@ -61,11 +64,20 @@ def others(procs: list | None = None, me: int | None = None) -> list:
     return [p for p in procs if p["pid"] not in mine and is_analyzer_cmd(p["cmd"])]
 
 
-def read() -> dict | None:
+def _read(path: Path) -> dict | None:
     try:
-        return json.loads(LOCK.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+def read() -> dict | None:
+    """내 잠금 파일. 없으면 옛 자리의 잠금(옛 빌드가 돌고 있을 때)."""
+    held = _read(LOCK)
+    if held is None and LEGACY_LOCK != LOCK:
+        old = _read(LEGACY_LOCK)
+        if old and pid_alive(int(old.get("pid") or 0)): return old
+    return held
 
 
 def acquire(args: list) -> dict | None:
@@ -85,7 +97,7 @@ def acquire(args: list) -> dict | None:
 
 def set_plan(keys: list):
     """이번 실행이 처리할 묶음 키("<출처>/<첫 파일 이름>")를 잠금 파일에 더한다. 데스크톱 전사 대기열이 중복을 거를 때 읽는다(2026-11-12)."""
-    held = read()
+    held = _read(LOCK)
     if not held or int(held.get("pid") or 0) != os.getpid(): return
     held["plan"] = keys
     try: LOCK.write_text(json.dumps(held, ensure_ascii=False), encoding="utf-8")
@@ -93,7 +105,7 @@ def set_plan(keys: list):
 
 
 def release():
-    held = read()
+    held = _read(LOCK)
     if held and int(held.get("pid") or 0) == os.getpid():
         try: LOCK.unlink()
         except OSError: pass

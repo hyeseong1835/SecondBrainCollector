@@ -13,11 +13,11 @@ class AsrModelTests(unittest.TestCase):
         for n in ("ggml-batisay-ko-turbo-q8_0.bin", "ggml-large-v3-turbo.bin", "ggml-silero-v5.1.2.bin",
                   "ggml-medium.en.bin", "ggml-tiny.en-q5_1.bin", "for-tests-ggml-tiny.bin", "EXAONE.gguf"):
             (self.models / n).write_bytes(b"x" * 3)
-        self.old = M.ANALYSIS, os.environ.pop("SECONDBRAIN_INSTANCE", None)
-        M.ANALYSIS = self.root
+        self.old = M.ANALYSIS, os.environ.pop("SECONDBRAIN_INSTANCE", None), M.SETTINGS, M.LEGACY_SETTINGS
+        M.ANALYSIS = M.SETTINGS = M.LEGACY_SETTINGS = self.root
 
     def tearDown(self):
-        M.ANALYSIS = self.old[0]
+        M.ANALYSIS, M.SETTINGS, M.LEGACY_SETTINGS = self.old[0], self.old[2], self.old[3]
         if self.old[1] is not None: os.environ["SECONDBRAIN_INSTANCE"] = self.old[1]
         else: os.environ.pop("SECONDBRAIN_INSTANCE", None)
         self.tmp.cleanup()

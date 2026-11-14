@@ -1,7 +1,7 @@
 ﻿<#
 pull-recordings.ps1 · pull-call-recordings.ps1가 같이 쓰는 것(2026-11-11). 점 소스로 읽는다: . "$PSScriptRoot\pull-common.ps1"
   - $adb: %LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe
-  - PutCopy: 사본 위치를 SecondBrain API(PUT /api/recordings/files)에 적는다. 키는 훅 키(%LOCALAPPDATA%\SecondBrain\api.json)
+  - PutCopy: 사본 위치를 SecondBrain API(PUT /api/recordings/files)에 적는다. 키는 훅 키(%USERPROFILE%\.secondbrain\api.json, 없으면 옛 %LOCALAPPDATA%\SecondBrain\api.json)
   - Progress: -ProgressJson이면 "@@progress {json}" 한 줄(데스크톱 녹음 화면이 읽음. analyze.py --progress-json과 같은 방식)
   - Enter-PullLock: 가져오기 동시 실행 막기(두 스크립트가 같은 이름 뮤텍스). 이미 돌면 busy를 내고 종료 코드 3
   - Get-Deleted: 녹음 화면에서 지운 파일(<출처 폴더>\deleted.tsv, 묘비)의 이름 모음. 가져오기는 이 이름을 건너뛴다(지운 파일을 다시 가져오지 않게)
@@ -37,7 +37,9 @@ function Enter-PullLock {
     $script:PullMutex = $m   # 프로세스가 끝나면 풀린다
 }
 
-$apiCfg = Get-Content (Join-Path $env:LOCALAPPDATA "SecondBrain\api.json") -Raw | ConvertFrom-Json
+$apiJson = Join-Path $env:USERPROFILE ".secondbrain\api.json"   # 2026-11-14 옮김(Claude 앱 셸의 AppData 사본 문제)
+if (-not (Test-Path $apiJson)) { $apiJson = Join-Path $env:LOCALAPPDATA "SecondBrain\api.json" }
+$apiCfg = Get-Content $apiJson -Raw | ConvertFrom-Json
 function PutCopy($rel, $path, $bytes, $sha) {
     $body = @{ device = 'phone'; file = $rel; location = 'laptop'; path = $path; bytes = $bytes; sha256 = $sha } | ConvertTo-Json -Compress
     try { Invoke-RestMethod "$($apiCfg.url.TrimEnd('/'))/api/recordings/files" -Method Put -Headers @{ Authorization = "Bearer $($apiCfg.key)" } -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body)) | Out-Null; $true }

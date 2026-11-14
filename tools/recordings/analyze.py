@@ -11,8 +11,8 @@
   python analyze.py --progress-json # 사람이 읽는 줄 사이에 "@@progress {json}" 줄(데스크톱 녹음 화면이 읽음)
   python analyze.py --source phone --pick X.m4a --only-new   # 이미 전사된 묶음이면 건너뜀(데스크톱 전사 대기열이 씀)
 
-동시 실행 막기(runlock.py): %LOCALAPPDATA%/SecondBrain/analysis/analyze.lock + 명령줄에 analyze.py가 든 다른 python 프로세스. 이미 돌고 있으면 종료 코드 3.
-전사 대기열(2026-11-12): 데스크톱 녹음 화면이 %LOCALAPPDATA%/SecondBrain/analysis/queue.json에 쌓아 두고 차례로 이 스크립트를 띄운다.
+동시 실행 막기(runlock.py): %USERPROFILE%/.secondbrain/analysis/analyze.lock + 명령줄에 analyze.py가 든 다른 python 프로세스. 이미 돌고 있으면 종료 코드 3.
+전사 대기열(2026-11-12): 데스크톱 녹음 화면이 %USERPROFILE%/.secondbrain/analysis/queue.json(2026-11-14 옮김)에 쌓아 두고 차례로 이 스크립트를 띄운다.
   묶음을 정하면 잠금 파일에 "plan"(이번 실행이 처리할 묶음 키 "<출처>/<첫 파일 이름>" 목록)을 적어, 대기열이 같은 묶음을 두 번 넣지 않게 한다.
 진행 중인 묶음(마지막 파일 뒤 간격이 안 지남)은 --file·--pick으로 골라도 분석하지 않는다(종료 코드 4).
 
@@ -31,7 +31,7 @@
 화자 구분: speakers.py(sherpa-onnx). phone·call·laptop-mic. '나' 기준은 python speakers.py enroll로 먼저 만든다(없으면 화자1·화자2…만)
 도구·모델: %LOCALAPPDATA%/SecondBrain/analysis (whisper.cpp Vulkan 빌드, ffmpeg, llama.cpp Vulkan, 모델들)
   전사 모델은 고를 수 있다(asrmodels.py, 기본 batisay-ko-turbo q8_0) + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
-API: %LOCALAPPDATA%/SecondBrain/api.json의 url·key(훅 키). 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 있으면 그것(시험 인스턴스)
+API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrain/api.json, sbpaths.py)의 url·key(훅 키). 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 있으면 그것(시험 인스턴스)
 전사 모델(--asr-model, 2026-11-13): models/ggml-*.bin 중 하나. 주지 않으면 settings.json의 asrModel(데스크톱 설정에서 고름) → batisay-ko-turbo-q8_0
   python analyze.py --list-models   # 쓸 수 있는 모델과 기본값(JSON)
   python analyze.py --source phone --pick X.m4a --asr-model large-v3-turbo --dry-run
@@ -44,9 +44,10 @@ import bundles as B
 import runlock
 import trash as T
 import asrmodels as M
+import sbpaths
 
 LOCAL = Path(os.environ["LOCALAPPDATA"])
-A = LOCAL / "SecondBrain" / "analysis"
+A = sbpaths.TOOLS   # 도구·모델(옮기지 않음)
 WHISPER = A / "src" / "whisper.cpp" / "build" / "bin" / "whisper-cli.exe"
 ASR_MODEL = A / "models" / f"ggml-{M.DEFAULT}.bin"   # run()이 --asr-model·설정값으로 바꾼다
 VAD_MODEL = A / "models" / "ggml-silero-v5.1.2.bin"
@@ -64,7 +65,7 @@ HALLUCINATIONS = re.compile(r"^(시청해\s*주셔서\s*감사합니다|구독�
 def api():
     # 시험 인스턴스: 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 api.json보다 앞선다(데스크톱 Settings와 같은 이름. 데스크톱이 띄우면 물려받음)
     env_url, env_key = os.environ.get("SECONDBRAIN_API"), os.environ.get("SECONDBRAIN_API_KEY")
-    cfg = {} if env_url and env_key else json.load(open(LOCAL / "SecondBrain" / "api.json", encoding="utf-8"))
+    cfg = {} if env_url and env_key else json.load(open(sbpaths.api_json(), encoding="utf-8"))
     base, key = (env_url or cfg["url"]).rstrip("/"), env_key or cfg["key"]
 
     def call(method, path, body=None):
