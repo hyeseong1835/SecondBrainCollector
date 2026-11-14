@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -13,7 +13,8 @@ public sealed class Config
 {
     /// <summary>앱 이름. 수집기는 "collector", 대시보드는 "dashboard". 시작 시 한 번 정한다.</summary>
     public static string AppName { get; set; } = "collector";
-    private static string LocalAppData => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+    /// <summary>%LOCALAPPDATA%. 후보 경로 중 SecondBrain 폴더가 있는 곳(<see cref="LocalPaths"/>, 2026-11-14).</summary>
+    private static string LocalAppData => LocalPaths.LocalAppData;
     /// <summary>자료 폴더 %LOCALAPPDATA%\SecondBrain\{collector,dashboard}. 2026-11-11 SecondBrain로 이름을 바꾸기 전에는 %LOCALAPPDATA%\LifeLog였다.</summary>
     public static string Root { get; } = Path.Combine(LocalAppData, "SecondBrain");
     public static string OldRoot { get; } = Path.Combine(LocalAppData, "LifeLog");
@@ -37,6 +38,8 @@ public sealed class Config
     public static string PluginsDir => Path.Combine(Dir, "plugins");
     public static string QueuePath => Path.Combine(Dir, "queue.db");
     private static string FilePath => Path.Combine(Dir, "config.json");
+    /// <summary>수집기 설정 파일(진단 화면용). 대시보드도 이 파일을 먼저 본다.</summary>
+    public static string CollectorConfigPath => Path.Combine(Root, "collector", "config.json");
 
     [JsonPropertyName("device")] public string Device { get; set; } = "";
     [JsonPropertyName("host")] public string Host { get; set; } = "";
@@ -65,23 +68,35 @@ public sealed class Config
     public string GetApiKey()
         => Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(ApiKeyProtected), null, DataProtectionScope.CurrentUser));
 
+    /// <summary>
+    /// 설정을 읽는다. 없으면 null. 접근이 막혔으면(샌드박스 등) 원인 안내가 붙은 <see cref="LocalFileDeniedException"/>,
+    /// 깨진 JSON이면 경로가 붙은 InvalidOperationException. 예전에는 File.Exists가 막힘을 "없음"으로 돌려 "setup을 먼저 하세요"가 떴다.
+    /// </summary>
     public static Config? Load()
     {
-        if (File.Exists(FilePath)) return JsonSerializer.Deserialize<Config>(File.ReadAllText(FilePath));
+        var paths = new List<string> { FilePath };
         // 같은 기기의 다른 앱(수집기 ↔ 대시보드)은 같은 기기 롤을 쓴다. DPAPI가 같은 사용자라 그대로 읽힌다.
         foreach (var other in new[] { "collector", "dashboard" })
+            if (other != AppName) paths.Add(Path.Combine(Root, other, "config.json"));
+        foreach (var f in paths)
         {
-            var f = Path.Combine(Root, other, "config.json");
-            if (other != AppName && File.Exists(f)) return JsonSerializer.Deserialize<Config>(File.ReadAllText(f));
+            var text = LocalPaths.ReadText(f);
+            if (text is null) continue;
+            try { return JsonSerializer.Deserialize<Config>(text); }
+            catch (JsonException e) { throw new InvalidOperationException($"설정 파일이 깨졌습니다({f}): {e.Message}", e); }
         }
         return null;
     }
 
-    public void Save()
+    /// <summary>설정이 없을 때 보일 글. 경로와, 샌드박스로 보이면 그 안내를 붙인다.</summary>
+    public static string MissingHint()
     {
-        Directory.CreateDirectory(Dir);
-        File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        var why = LocalPaths.SandboxReason();
+        return $"수집기 설정이 없습니다({CollectorConfigPath})." +
+               (why is null ? " 수집기 setup을 먼저 하세요." : $" 샌드박스에서 실행된 것 같습니다({why}). 시작 메뉴의 SecondBrain 바로가기로 다시 켜세요.");
     }
+
+    public void Save() => LocalPaths.WriteTextAtomic(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
 
     public void SetPassword(string plain)
         => PasswordProtected = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(plain), null, DataProtectionScope.CurrentUser));

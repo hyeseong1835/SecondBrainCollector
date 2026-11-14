@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -17,7 +17,7 @@ public static class SecretStore
 
     private static JsonObject Load()
     {
-        try { if (File.Exists(FilePath)) return JsonNode.Parse(File.ReadAllText(FilePath))?.AsObject() ?? new(); }
+        try { if (LocalPaths.ReadText(FilePath) is { } text) return JsonNode.Parse(text)?.AsObject() ?? new(); }
         catch (JsonException) { }
         return new();
     }
@@ -48,10 +48,7 @@ public static class SecretStore
             if (string.IsNullOrEmpty(value)) p.Remove(key);
             else p[key] = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(value), null, DataProtectionScope.CurrentUser));
             if (p.Count == 0) all.Remove(plugin); else all[plugin] = p;
-            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            var tmp = FilePath + ".tmp";
-            File.WriteAllText(tmp, all.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-            File.Move(tmp, FilePath, overwrite: true);
+            LocalPaths.WriteTextAtomic(FilePath, all.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         }
     }
 
