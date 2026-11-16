@@ -109,3 +109,20 @@ powershell -ExecutionPolicy Bypass -File scripts\verify.ps1 -Restore   # 빌드 
   `net_key` = 와이파이 `wifi:<SSID>`, 유선 `lan:<게이트웨이 MAC>`(ARP 실패 시 `lan-ip:<IP>`). SSID는 WinRT `GetConnectedSsid`, 비면 프로필 이름(24H2 위치 권한 없을 때).
 - 설치 설정 `zones`(JSON 문자열, `x-ui: network-zones`): 네트워크별 거리 구간. 수집기는 읽지 않고 웹 설정 › 네트워크별 거리 구간이 쓰고, 웹·데스크톱 화면이 RSSI를 구간 이름으로 바꿔 보인다.
 - 시험: `network-test`(지금 값 한 줄), `node --test tools/plugin-tests/win-network.test.mjs`.
+
+## 오디오 장치 (2026-11-16)
+- 소스 `audio_device`(`AudioDeviceSource`), 플러그인 `win-audio-device`: Windows 오디오 입력·출력 장치(MMDevice)를 센서가 준 값 그대로 구간으로 남긴다. 기기 id·종류 판단은 넣지 않는다(Documents/기기.md 0절).
+  장치·기본 장치 바뀜은 MMDevice 알림으로 바로, 사용 여부는 3초마다 오디오 세션 상태로 읽고, 알림을 놓쳐도 1분마다 다시 읽는다.
+- 출력(모두 구간): `device`(endpoint_id·name·flow render/capture·form_factor·state·instance_id. state = `active` 켜져 있는 동안, `unplugged` 잭이 뽑히거나 블루투스가 끊겨 목록에 남은 동안. 꺼짐·사라짐은 구간 없음),
+  `default`(flow·role console/communications·endpoint_id·name = 그 역할의 기본 장치였던 동안), `usage`(endpoint_id·flow·name = 시스템 소리가 아닌 오디오 세션이 흐르던 동안).
+- `instance_id`: 블루투스 장치는 MAC이 든 BTHENUM 경로 그대로(endpoint 속성 `{b3f8fa53-0004-438e-9003-51a46e139bfc},39`, 예: `{1}.BTHENUM\{0000110B-…}_VID&…\7&…&0&8892CC81706A_C00000000`). 파싱은 서버가 한다.
+  그 속성이 없으면 컨트롤러 경로(`,2`, 예: `{1}.INTELAUDIO\FUNC_01&…`)를 그대로 둔다.
+- 시험: `audio-device-test [초] [--ndjson]`(지금 장치·기본 장치 + 그 초 동안 소스 이벤트, DB 없이), `node --test tools/plugin-tests/win-audio-device.test.mjs`.
+  실제 이벤트를 플러그인에 먹여 행 모양 보기: `audio-device-test 10 --ndjson | node tools/plugin-tests/win-audio-device.test.mjs --live`.
+
+## 블루투스 (2026-11-16)
+- 소스 `bluetooth`(`BluetoothSource`), 플러그인 `win-bluetooth`: 이 노트북에 **페어링한** 기기(클래식 `BluetoothDevice`·LE `BluetoothLEDevice`)의 링크 연결·끊김(`ConnectionStatusChanged`, 30초마다 목록 다시 읽기)과 어댑터 켜짐·꺼짐(`Radio.StateChanged`)을 `connection`·`adapter` 구간으로 남긴다. 안드로이드 `phone-bluetooth`와 같은 열(`audio` 출력만 없음. 오디오는 win-audio-device).
+- 같은 주소의 클래식·LE는 한 기기(`device_type` dual, `transports` "bredr,le"). 클래스는 클래식 CoD에서 안드로이드와 같은 값(`major_class`, `device_class` = CoD & 0x1FFC). LE 전용은 클래스 없음 → `kind` other.
+- 배터리: PnP 속성 `{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2`(컨테이너의 노드). 기기가 알려 줄 때만(이 PC에서는 ULT WEAR·S26·MX Master가 나옴). 프로필(`profiles`)은 윈도우가 주지 않아 늘 null.
+- 랜덤 주소 LE 기기(address_type random: Logitech·Xbox 패드·폰의 LE 링크 등)는 기본으로 기록하지 않는다. 설정 `include_random_le`를 켜면 이름만 기록(주소는 늘 null). 개인정보 `store_address`를 끄면 MAC도 null.
+- 시험: `bluetooth-test [초]`(지금 기기·링크 상태 + 초를 주면 이벤트), `node --test tools/plugin-tests/win-bluetooth.test.mjs`.

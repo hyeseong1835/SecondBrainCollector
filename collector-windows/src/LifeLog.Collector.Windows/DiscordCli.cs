@@ -56,7 +56,7 @@ static class DiscordCli
     /// <summary>입력(마이크) 장치 목록. --json이면 [{ id, name, default }](default = 기본 통신 입력 장치).</summary>
     public static async Task<int> MicDevices(bool json)
     {
-        var list = new List<(string Id, string Name, bool Default)>();
+        var list = new List<(string Id, string Name, bool Default, string? InstanceId)>();
         using (var en = new MMDeviceEnumerator())
         {
             string? defId = null;
@@ -67,19 +67,19 @@ static class DiscordCli
                     var name = d.FriendlyName;
                     if (!json)
                         try { var v = d.AudioEndpointVolume; name += $"  [볼륨 {v.MasterVolumeLevelScalar * 100:F0}%{(v.Mute ? ", 음소거" : "")}]"; } catch { }
-                    list.Add((d.ID, name, d.ID == defId));
+                    list.Add((d.ID, name, d.ID == defId, InputDeviceInfo.Of(d).InstanceId));
                 }
         }
         if (json)
         {
             Console.OutputEncoding = Encoding.UTF8;
-            Console.WriteLine(JsonSerializer.Serialize(list.Select(x => new { id = x.Id, name = x.Name, @default = x.Default })));
+            Console.WriteLine(JsonSerializer.Serialize(list.Select(x => new { id = x.Id, name = x.Name, @default = x.Default, instance_id = x.InstanceId })));
             return 0;
         }
         var cur = await CurrentSettingAsync(LaptopMicSettings.Plugin, "input_device");
         Console.WriteLine("입력(마이크) 장치:");
-        foreach (var (id, name, def) in list)
-            Console.WriteLine($"{(id == cur ? "* " : "  ")}{name}{(def ? "  (기본 통신)" : "")}\n    {id}");
+        foreach (var (id, name, def, instanceId) in list)
+            Console.WriteLine($"{(id == cur ? "* " : "  ")}{name}{(def ? "  (기본 통신)" : "")}\n    {id}{(instanceId is null ? "" : $"\n    {instanceId}")}");
         Console.WriteLine(string.IsNullOrEmpty(cur) ? "고른 장치 없음: 기본 통신 입력 장치를 씁니다. 바꾸기: mic-device <이름 일부|ID>" : $"고른 장치: {cur}");
         return 0;
     }

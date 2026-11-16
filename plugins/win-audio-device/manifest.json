@@ -1,0 +1,65 @@
+{
+  "type": "collector",
+  "id": "win-audio-device",
+  "version": "1.0.0",
+  "name": "오디오 장치 (Windows)",
+  "min_host_version": 1,
+  "platforms": [
+    "windows"
+  ],
+  "runtimes": {
+    "js": "main.js"
+  },
+  "capabilities": [
+    {
+      "id": "event:audio_device",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "device",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "endpoint_id": "text",
+        "name": "text",
+        "flow": "text",
+        "form_factor": "text",
+        "state": "text",
+        "instance_id": "text"
+      },
+      "label": "name",
+      "identity": ["endpoint_id", "state"],
+      "index": ["endpoint_id"]
+    },
+    {
+      "name": "default",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "flow": "text",
+        "role": "text",
+        "endpoint_id": "text",
+        "name": "text"
+      },
+      "label": "name",
+      "identity": ["flow", "role"],
+      "index": ["endpoint_id"]
+    },
+    {
+      "name": "usage",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "endpoint_id": "text",
+        "flow": "text",
+        "name": "text"
+      },
+      "label": "name",
+      "identity": ["endpoint_id"],
+      "index": ["endpoint_id"]
+    }
+  ],
+  "description": "Windows 오디오 입력·출력 장치(MMDevice)를 센서가 준 값 그대로 구간으로 기록한다. device = 장치가 켜져(state active) 있거나 잭이 뽑혀(unplugged) 있던 동안(endpoint ID·이름·흐름 render/capture·폼팩터·장치 인스턴스 ID, 블루투스면 MAC이 든 BTHENUM 경로 그대로), default = 역할(console/communications)별 기본 장치였던 동안, usage = 그 장치로 오디오 세션이 흐르던 동안. 같은 기기인지 보는 일은 기록이 아니라 조회할 때 한다."
+}

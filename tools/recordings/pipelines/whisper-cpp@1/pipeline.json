@@ -1,0 +1,10 @@
+{
+  "name": "whisper-cpp",
+  "version": "1",
+  "description": "whisper.cpp(whisper-cli, Vulkan) + Silero VAD(-vsd 500 -vp 200), 한국어. 파일 하나를 한 번에 전사하고 앞 글을 다음 구간 힌트로 넘긴다(2026-11-16까지의 analyze.py 동작 그대로). 무음 환각 문장은 거른다",
+  "autoRecommend": true,
+  "entry": "transcribe.py",
+  "settings": {
+    "asrModel": {"type": "whisper-model", "default": "batisay-ko-turbo-q8_0", "label": "전사 모델"}
+  }
+}

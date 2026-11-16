@@ -4,13 +4,17 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.AudioRouting
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaRecorder
+import android.os.Handler
+import android.os.Looper
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
@@ -29,7 +33,9 @@ import kotlin.math.sqrt
  * - 바닥 + [START_DB]를 [START_FRAMES] 프레임 넘기면 시작, 바닥 + [KEEP_DB] 아래가 [STOP_FRAMES] 프레임 이어지면 끝. 시작 전 [PREROLL_FRAMES]를 앞에 붙인다.
  * - 파일은 AAC 32kbps(.m4a). 쓰는 동안 `.part`, 다 쓰면 이름을 바꾼다. 지우지 않는다(삭제는 사람이 직접).
  * - 위치: 앱 전용 외부 저장소 `files/recordings/yyyy-MM-dd/yyyyMMdd-HHmmss-xxxxxxxx.m4a`(adb pull로 가져간다).
- * - 파일 하나가 끝날 때마다 { start, end, file, bytes, sha256, codec, duration_ms, mean_db, peak_db, floor_db }를 낸다.
+ * - 파일 하나가 끝날 때마다 { start, end, file, bytes, sha256, codec, duration_ms, mean_db, peak_db, floor_db, input_* }를 낸다.
+ * - input_*(2026-11-16, Documents/기기.md 6절): 녹음에 실제로 쓰인 입력 장치. AudioRecord.getRoutedDevice의 값 그대로(종류 TYPE_*, 제품 이름, 주소(블루투스면 MAC), id).
+ *   구간을 열 때 값을 읽고, 쓰는 동안 경로가 다른 장치로 바뀌면 input_changed=true(값은 처음 것을 유지, 바뀐 뒤 값은 다음 파일이 담는다). 경로를 못 읽으면 input_*를 뺀다.
  *
  * 마이크 포그라운드 서비스 권한(RECORD_AUDIO)이 있어야 한다. Android 14+는 부팅 직후(앱을 열기 전) 마이크 서비스를 시작할 수 없어 소리가 0으로 들어온다.
  */
@@ -47,8 +53,38 @@ class AudioSource(private val context: Context) : EventSource {
         const val MAX_FRAMES = 20 * 60 * 30    // 30분이면 나눈다
         const val CODEC = "aac-lc 32kbps 16kHz mono"
         fun dir(context: Context) = File(context.getExternalFilesDir(null), "recordings")
+
+        /** AudioDeviceInfo.TYPE_* 상수 이름(읽기 쉽게 같이 남긴다. 모르는 값은 TYPE_숫자). */
+        fun typeName(type: Int): String = when (type) {
+            AudioDeviceInfo.TYPE_BUILTIN_MIC -> "BUILTIN_MIC"
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "BLUETOOTH_SCO"
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "BLUETOOTH_A2DP"
+            AudioDeviceInfo.TYPE_WIRED_HEADSET -> "WIRED_HEADSET"
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "WIRED_HEADPHONES"
+            AudioDeviceInfo.TYPE_USB_DEVICE -> "USB_DEVICE"
+            AudioDeviceInfo.TYPE_USB_HEADSET -> "USB_HEADSET"
+            AudioDeviceInfo.TYPE_USB_ACCESSORY -> "USB_ACCESSORY"
+            AudioDeviceInfo.TYPE_TELEPHONY -> "TELEPHONY"
+            AudioDeviceInfo.TYPE_BUS -> "BUS"
+            AudioDeviceInfo.TYPE_REMOTE_SUBMIX -> "REMOTE_SUBMIX"
+            AudioDeviceInfo.TYPE_BLE_HEADSET -> "BLE_HEADSET"
+            AudioDeviceInfo.TYPE_HEARING_AID -> "HEARING_AID"
+            AudioDeviceInfo.TYPE_DOCK -> "DOCK"
+            AudioDeviceInfo.TYPE_LINE_ANALOG -> "LINE_ANALOG"
+            AudioDeviceInfo.TYPE_LINE_DIGITAL -> "LINE_DIGITAL"
+            AudioDeviceInfo.TYPE_HDMI -> "HDMI"
+            AudioDeviceInfo.TYPE_IP -> "IP"
+            AudioDeviceInfo.TYPE_UNKNOWN -> "UNKNOWN"
+            else -> "TYPE_$type"
+        }
     }
 
+    /** AudioRecord.getRoutedDevice를 풀어 낸 저수준 값. 안 바뀐 장치끼리는 같다(data class). */
+    private data class Route(val type: Int, val product: String, val address: String, val id: Int) {
+        constructor(d: AudioDeviceInfo) : this(d.type, d.productName?.toString() ?: "", d.address ?: "", d.id)
+    }
+
+    @Volatile private var route: Route? = null
     @Volatile private var stop = false
     private var thread: Thread? = null
 
@@ -69,6 +105,10 @@ class AudioSource(private val context: Context) : EventSource {
         var loud = 0; var quiet = 0
         var seg: Segment? = null
         rec.startRecording()
+        route = rec.routedDevice?.let { Route(it) }
+        // 경로가 바뀌면(블루투스 연결·유선 헤드셋 등) 알림이 온다. 못 읽는 순간(null)은 값을 덮지 않는다(마지막으로 읽은 장치를 유지)
+        val onRoute = AudioRouting.OnRoutingChangedListener { r -> r.routedDevice?.let { route = Route(it) } }
+        rec.addOnRoutingChangedListener(onRoute, Handler(Looper.getMainLooper()))
         try {
             while (!stop) {
                 val buf = ShortArray(FRAME)
@@ -98,6 +138,7 @@ class AudioSource(private val context: Context) : EventSource {
             }
         } finally {
             seg?.let { runCatching { emit(it.finish(Instant.now(), floor)) } }
+            runCatching { rec.removeOnRoutingChangedListener(onRoute) }
             runCatching { rec.stop() }; rec.release()
         }
     }
@@ -123,6 +164,7 @@ class AudioSource(private val context: Context) : EventSource {
         var frames = 0; private set
         private var sumDb = 0.0; private var peak = -120.0
         private val info = MediaCodec.BufferInfo()
+        private var inRoute: Route? = route; private var routeChanged = false
 
         init {
             val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, RATE, 1).apply {
@@ -136,6 +178,7 @@ class AudioSource(private val context: Context) : EventSource {
 
         fun write(pcm: ShortArray, db: Double) {
             frames++; sumDb += db; if (db > peak) peak = db
+            route?.let { cur -> val first = inRoute; if (first == null) inRoute = cur else if (cur != first) routeChanged = true }
             queue(pcm, false)
             drain(false)
         }
@@ -179,6 +222,7 @@ class AudioSource(private val context: Context) : EventSource {
             part.renameTo(file)
             val md = MessageDigest.getInstance("SHA-256")
             file.inputStream().use { s -> val b = ByteArray(1 shl 16); while (true) { val r = s.read(b); if (r <= 0) break; md.update(b, 0, r) } }
+            val r = inRoute
             return JSONObject()
                 .put("start", start.toString()).put("end", end.toString())
                 .put("file", rel).put("bytes", file.length())
@@ -186,6 +230,10 @@ class AudioSource(private val context: Context) : EventSource {
                 .put("codec", CODEC).put("duration_ms", samples * 1000 / RATE)
                 .put("mean_db", if (frames > 0) sumDb / frames else -120.0).put("peak_db", peak)
                 .put("floor_db", (floorAtStart + floor) / 2)
+                .apply {
+                    if (r != null) put("input_type", r.type).put("input_type_name", typeName(r.type)).put("input_product", r.product)
+                        .put("input_address", r.address).put("input_id", r.id).put("input_changed", routeChanged)
+                }
         }
     }
 }

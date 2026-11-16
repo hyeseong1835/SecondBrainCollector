@@ -1,0 +1,80 @@
+{
+  "type": "collector",
+  "id": "win-bluetooth",
+  "version": "1.0.0",
+  "name": "블루투스 (Windows)",
+  "min_host_version": 1,
+  "platforms": [
+    "windows"
+  ],
+  "runtimes": {
+    "js": "main.js"
+  },
+  "capabilities": [
+    {
+      "id": "event:bluetooth",
+      "required": true
+    },
+    {
+      "id": "timer",
+      "required": true
+    }
+  ],
+  "privacy": [
+    {
+      "key": "store_address",
+      "type": "boolean",
+      "default": true,
+      "label": "기기 MAC 주소 저장 (끄면 이름만. 이름이 같은 기기는 구분하지 못한다)"
+    }
+  ],
+  "settings": [
+    {
+      "key": "include_random_le",
+      "type": "boolean",
+      "default": false,
+      "label": "랜덤 주소 BLE 기기도 기록 (주소는 저장하지 않고 이름만)",
+      "description": "페어링한 LE 기기 중 랜덤 주소를 쓰는 것(Logitech 마우스·Xbox 패드·폰의 LE 링크 등). 기본은 기록하지 않는다. 켜도 랜덤 주소는 저장하지 않으므로 이름이 같으면 구분하지 못한다."
+    }
+  ],
+  "outputs": [
+    {
+      "name": "connection",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "address": "text",
+        "name": "text",
+        "kind": "text",
+        "device_type": "text",
+        "major_class": "text",
+        "device_class": "integer",
+        "transports": "text",
+        "profiles": "text",
+        "battery_start": "integer",
+        "battery_end": "integer"
+      },
+      "label": "name",
+      "identity": [
+        "address",
+        "name"
+      ],
+      "index": [
+        "address"
+      ]
+    },
+    {
+      "name": "adapter",
+      "kind": "span",
+      "schema_version": 1,
+      "columns": {
+        "state": "text"
+      },
+      "label": "state",
+      "identity": [
+        "state"
+      ]
+    }
+  ],
+  "description": "이 노트북에 페어링한 블루투스 기기(클래식·LE)가 연결돼 있던 동안(이름·MAC·클래스·배터리)과 블루투스 어댑터 켜짐·꺼짐을 구간으로 기록한다. 페어링하지 않은 주변 기기와 랜덤 주소는 담지 않는다. 오디오 출력은 win-audio-device가 맡는다. 같은 기기를 폰·노트북에서 맞추는 데 쓰는 저수준 값이다(phone-bluetooth와 같은 모양)."
+}

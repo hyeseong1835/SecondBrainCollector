@@ -9,6 +9,7 @@ namespace LifeLog.Collector.Windows.Sources;
 /// 디스코드 출력 녹음(루프백, 상대 목소리)에는 내 목소리가 없어서, 내 목소리는 이 녹음이 기준이 된다(겹치는 폰 녹음은 분석에서 거른다).
 /// - 장치: 플러그인 win-laptop-mic 설정 input_device(ID 또는 이름 일부). 비면 Windows 기본 통신 입력 장치를 쓰고, 기본 장치가 바뀌면 다시 붙는다.
 /// - 구간 규칙·기록 형식은 discord_output·폰 녹음과 같다(<see cref="Segmenter"/>, <see cref="WasapiSegmentCapture"/>).
+/// - 행에는 쓴 입력 장치의 endpoint ID·이름·인스턴스 ID도 담긴다(input_device_id·input_device_name·input_device_instance_id, <see cref="InputDeviceInfo"/>).
 /// - 파일: %USERPROFILE%\SecondBrainRecordings\laptop-mic\yyyy-MM-dd\yyyyMMdd-HHmmss-xxxxxxxx.m4a(지우지 않음).
 /// 장치가 없거나 끊기면 10초마다 다시 붙는다.
 /// </summary>
@@ -76,7 +77,8 @@ public sealed class LaptopMicSource : ISource
         using var en = new MMDeviceEnumerator();
         using var device = FindDevice(en, key);
         var id = device.ID;
-        WasapiSegmentCapture.Run(device, loopback: false, new Segmenter(Folder, Tag, _emit!, _log), Tag, _log, _cts.Token, () =>
+        var info = InputDeviceInfo.Of(device);   // 녹음에 쓴 장치의 저수준 값(endpoint ID·이름·인스턴스 ID)을 행에 남긴다
+        WasapiSegmentCapture.Run(device, loopback: false, new Segmenter(Folder, Tag, _emit!, _log, extra: info.Columns), Tag, _log, _cts.Token, () =>
         {
             if (!DiscordCall.Recording) { _log($"[{Tag}] 녹음 멈춤({DiscordCall.Why}). 장치를 닫습니다"); return true; }
             if (LaptopMicSettings.Version != version)
