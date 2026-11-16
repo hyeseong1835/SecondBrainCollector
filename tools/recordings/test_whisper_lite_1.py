@@ -150,8 +150,9 @@ class TranscribeTests(unittest.TestCase):
         p = P.load(WL1)
         self.assertEqual((p.key, p.auto_recommend, p.hints), ("whisper-lite@1", False, True))
         root = Path(self.tmp.name) / "settings"
-        self.assertEqual(P.seed(p, root), [1])
-        self.assertEqual(P.read(p, 1, root), SETTINGS)   # seed = 매니페스트 기본값
+        self.assertEqual(P.seed(p, root), [1, 2])
+        self.assertEqual(P.read(p, 1, root), SETTINGS)   # seed 1 = 매니페스트 기본값(GPU)
+        self.assertEqual(P.read(p, 2, root), {**SETTINGS, "useGpu": False, "threads": 8})   # seed 2 = CPU만
 
     def test_quality_same_as_wc2(self):
         """품질 검사·필터는 whisper-cpp@2를 그대로 베꼈다(첫 설명 줄만 다름)"""
