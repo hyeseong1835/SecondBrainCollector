@@ -17,7 +17,7 @@ def load(name, path):
 
 
 T = load("wc2_transcribe", WC2 / "transcribe.py")
-Q = T.Q
+Q, V = T.Q, T.V
 SETTINGS = P.defaults(P.load(WC2))
 seg = lambda a, b, text, **kw: {"startMs": a, "endMs": b, "text": text, **kw}
 
@@ -128,8 +128,9 @@ class TranscribeTests(unittest.TestCase):
             data = {"transcription": [{"offsets": {"from": 1000, "to": 2000}, "text": text}]}
             (work / (Path(n).stem + ".json")).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    def run_it(self, **settings):
-        return T.transcribe(self.wav, self.work, {**SETTINGS, **settings}, False, self.tools)
+    def run_it(self, hints=None, **settings):
+        segs, stats, self.used = T.transcribe(self.wav, self.work, {**SETTINGS, **settings}, False, self.tools, hints)
+        return segs, stats
 
     def test_offsets_and_retry(self):
         bad = " ".join(["데스라인 벤션 2차 강화입니다."] * 10)
@@ -164,14 +165,138 @@ class TranscribeTests(unittest.TestCase):
         segs, _ = self.run_it(retryTemperature=0)
         self.assertEqual({s["text"] for s in segs}, {"안녕"})
 
+    def test_hints_prompt_and_fixes(self):
+        self.texts = {("c0000.wav", False): "세컨 브레인은 김철 수가", ("c0001.wav", False): "네", ("c0002.wav", False): "끝"}
+        hints = {"prompt": "김철수, SecondBrain", "ids": [3, 8],
+                 "fixes": [{"id": 12, "wrong": "세컨 브레인", "right": "SecondBrain"}, {"id": 13, "wrong": "없는말", "right": "x"}]}
+        segs, stats = self.run_it(hints)
+        self.assertEqual((segs[0]["text"], segs[0]["original"]), ("SecondBrain은 김철 수가", "세컨 브레인은 김철 수가"))
+        self.assertNotIn("original", segs[1])
+        self.assertEqual(self.used, [3, 8, 12])   # 프롬프트로 쓴 힌트 + 실제로 바꾼 고침 짝만
+        self.assertEqual(stats["fixedSegments"], 1)
+        base = self.calls[0][0]
+        self.assertEqual(base[base.index("--prompt") + 1], "김철수, SecondBrain")
+        self.assertEqual(base[base.index("-mc") + 1], "224")   # -mc 0이면 whisper.cpp가 프롬프트를 버린다
+
+    def test_hints_off(self):
+        self.texts = {("c0000.wav", False): "세컨 브레인", ("c0001.wav", False): "네", ("c0002.wav", False): "끝"}
+        hints = {"prompt": "SecondBrain", "ids": [8], "fixes": [{"id": 12, "wrong": "세컨 브레인", "right": "SecondBrain"}]}
+        segs, _ = self.run_it(hints, useHints=False)
+        self.assertEqual((segs[0]["text"], self.used), ("세컨 브레인", []))
+        base = self.calls[0][0]
+        self.assertNotIn("--prompt", base); self.assertEqual(base[base.index("-mc") + 1], "0")
+        segs, _ = self.run_it({"prompt": "", "ids": [8], "fixes": hints["fixes"]})   # 고침 짝만
+        self.assertEqual((segs[0]["text"], self.used), ("SecondBrain", [12]))
+        self.assertNotIn("--prompt", self.calls[-1][0])
+
     def test_manifest_and_seed(self):
         p = P.load(WC2)
-        self.assertEqual((p.key, p.entry.name, p.auto_recommend), ("whisper-cpp@2", "transcribe.py", True))
+        self.assertEqual((p.key, p.entry.name, p.auto_recommend, p.hints), ("whisper-cpp@2", "transcribe.py", True, True))
         self.assertEqual(p.schema["asrModel"]["type"], "whisper-model")
         root = Path(self.tmp.name) / "settings"
         self.assertEqual(P.seed(p, root), [1])
         self.assertEqual(P.read(p, 1, root), SETTINGS)
         self.assertEqual(SETTINGS["maxContext"], 0)
+
+
+class VocabTests(unittest.TestCase):
+    """고침 짝 치환: 낱말 경계(조사는 붙어도 됨), 구간에 걸친 짝, original"""
+    def fix(self, texts, *pairs):
+        segs = [seg(i * 100, i * 100 + 90, t) for i, t in enumerate(texts)]
+        return V.apply_fixes(segs, [{"id": k, "wrong": w, "right": r} for k, (w, r) in enumerate(pairs, 1)])
+
+    def test_boundaries(self):
+        out, used = self.fix(["세컨브레인 세컨브레인에서 세컨브레인은요 시세컨브레인 세컨브레인스"], ("세컨브레인", "SecondBrain"))
+        self.assertEqual(out[0]["text"], "SecondBrain SecondBrain에서 SecondBrain은요 시세컨브레인 세컨브레인스")   # 앞에 글자, 뒤에 조사 아닌 글자면 그대로
+        self.assertEqual((out[0]["original"], used), ("세컨브레인 세컨브레인에서 세컨브레인은요 시세컨브레인 세컨브레인스", [1]))
+        out, _ = self.fix(["김철도 왔어, 김철 김철수"], ("김철", "김철수"))
+        self.assertEqual(out[0]["text"], "김철수도 왔어, 김철수 김철수")   # 김철수의 김철은 뒤가 조사가 아니라 그대로
+        out, _ = self.fix(["(secondbrain)이랑 SECONDBRAIN"], ("secondbrain", "SecondBrain"))
+        self.assertEqual(out[0]["text"], "(SecondBrain)이랑 SecondBrain")   # 영문은 대소문자 무시
+        out, used = self.fix(["SecondBrain"], ("secondbrain", "SecondBrain"))
+        self.assertEqual((out[0], used), (seg(0, 90, "SecondBrain"), []))   # 이미 맞는 글이면 안 바꾼 것
+        out, used = self.fix(["가나다"], ("가", "x"), (" ", "y"))
+        self.assertEqual((out[0]["text"], used), ("가나다", []))   # 두 글자 안 되는 틀린 글은 쓰지 않음
+
+    def test_across_segments_and_order(self):
+        out, _ = self.fix(["오늘", "세컨", "브레인으로", "정리", "세컨  브레인"], ("세컨 브레인", "SecondBrain"))
+        self.assertEqual([(s["startMs"], s["endMs"], s["text"], s.get("original")) for s in out],
+                         [(0, 90, "오늘", None), (100, 290, "SecondBrain으로", "세컨 브레인으로"), (300, 390, "정리", None),
+                          (400, 490, "SecondBrain", "세컨  브레인")])
+        out, used = self.fix(["세컨 브레인 앱", "브레인 좋아"], ("세컨 브레인", "SecondBrain"), ("브레인", "Brain"), ("SecondBrain 앱", "SB앱"))
+        self.assertEqual([(s["text"], s["original"]) for s in out], [("SB앱", "세컨 브레인 앱"), ("Brain 좋아", "브레인 좋아")])   # 앞 짝부터 차례로, 원래 글은 처음 것
+        self.assertEqual(used, [1, 2, 3])
+        out, _ = V.apply_fixes([seg(0, 90, "세컨", suspect=True), seg(100, 190, "브레인")], [{"id": 1, "wrong": "세컨 브레인", "right": "SB"}])
+        self.assertEqual(out, [{"startMs": 0, "endMs": 190, "text": "SB", "suspect": True, "original": "세컨 브레인"}])
+
+    def test_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "h.json"
+            f.write_text(json.dumps({"prompt": " 김철수,\n SecondBrain ", "ids": [3],
+                                     "fixes": [{"id": 1, "wrong": "a b", "right": "c"}, {"wrong": " "}, "x"]}), encoding="utf-8")
+            self.assertEqual(V.load(f), {"prompt": "김철수, SecondBrain", "ids": [3], "fixes": [{"id": 1, "wrong": "a b", "right": "c"}]})
+            self.assertEqual(V.load(Path(tmp) / "none.json"), {"prompt": "", "fixes": [], "ids": []})
+
+    def test_group_words_keeps_original(self):
+        words = [dict(seg(0, 90, "오늘"), speaker=None), dict(seg(100, 190, "SecondBrain으로", original="세컨 브레인으로"), speaker=None),
+                 dict(seg(200, 290, "정리"), speaker=None), dict(seg(5000, 5090, "끝"), speaker=None)]
+        self.assertEqual([(s["text"], s.get("original")) for s in SP.group_words(words)],
+                         [("오늘 SecondBrain으로 정리", "오늘 세컨 브레인으로 정리"), ("끝", None)])
+
+
+class AnalyzeHintsTests(unittest.TestCase):
+    """analyze.py: /vocab/pick 본문·힌트 파일, 실패하면 힌트 없이, /vocab/used (가짜 서버)"""
+    def setUp(self):
+        import analyze, bundles as B
+        self.A, self.B = analyze, B
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.old = analyze.CHOSEN, analyze.VOCAB_OFF
+        analyze.CHOSEN = analyze.Chosen(P.load(WC2), 1, dict(SETTINGS))
+        analyze.VOCAB_OFF = False
+        self.calls, self.reply = [], None
+
+    def tearDown(self):
+        self.A.CHOSEN, self.A.VOCAB_OFF = self.old
+        self.tmp.cleanup()
+
+    def bundle(self, source, name):
+        return self.B.Bundle(source, [self.B.Item(source, name, 0, 1000, Path("C:/x") / name)])
+
+    def call(self, method, path, body=None):
+        self.calls.append((method, path, body))
+        if isinstance(self.reply, Exception): raise self.reply
+        return self.reply
+
+    def test_pick_and_file(self):
+        self.reply = {"hints": [{"id": 3, "kind": "name", "text": "김철수"}, {"id": 8, "kind": "term", "text": "SecondBrain"}],
+                      "prompt": "김철수, SecondBrain", "fixes": [{"id": 12, "wrong": "세컨브레인", "text": "SecondBrain"}], "skipped": 0}
+        path = self.A.bundle_hints(self.call, self.bundle("call", "통화 김철수_261114_130500.m4a"), self.root)
+        self.assertEqual(self.calls, [("POST", "/api/vocab/pick", {"caller": "김철수", "max": 20, "maxChars": 120})])
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")),
+                         {"prompt": "김철수, SecondBrain", "ids": [3, 8], "fixes": [{"id": 12, "wrong": "세컨브레인", "right": "SecondBrain"}]})
+        self.assertEqual(V.load(path)["fixes"][0]["right"], "SecondBrain")   # 파이프라인이 읽는 모양
+        self.reply = {"hints": [], "prompt": "", "fixes": [], "skipped": 0}
+        self.assertIsNone(self.A.bundle_hints(self.call, self.bundle("phone", "20261114-130500.m4a"), self.root))   # 고를 것 없음
+        self.assertEqual(self.calls[-1][2], {"max": 20, "maxChars": 120})   # 통화가 아니면 caller 없음
+
+    def test_use_hints_off_and_server_fail(self):
+        self.A.CHOSEN.settings["useHints"] = False
+        self.assertIsNone(self.A.bundle_hints(self.call, self.bundle("phone", "a.m4a"), self.root))
+        self.assertEqual(self.calls, [])
+        self.A.CHOSEN.settings["useHints"] = True
+        self.reply = OSError("HTTP Error 404")
+        self.assertIsNone(self.A.bundle_hints(self.call, self.bundle("phone", "a.m4a"), self.root))
+        self.assertIsNone(self.A.bundle_hints(self.call, self.bundle("phone", "b.m4a"), self.root))
+        self.assertEqual(len(self.calls), 1)   # 한 번 실패하면 이번 실행은 다시 묻지 않음
+
+    def test_mark_used(self):
+        self.reply = {"updated": 2}
+        self.A.mark_used(self.call, set())
+        self.A.mark_used(self.call, {12, 3})
+        self.assertEqual(self.calls, [("POST", "/api/vocab/used", {"ids": [3, 12]})])
+        self.reply = OSError("down")
+        self.A.mark_used(self.call, {1})   # 실패해도 예외 없음
 
 
 class ServerVersionTests(unittest.TestCase):

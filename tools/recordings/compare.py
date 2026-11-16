@@ -9,6 +9,8 @@
 - --words: 단어 단위 전사(화자 구분 대상 phone·call·laptop-mic과 같음) 뒤 analyze.py처럼 문장 구간으로 묶어(speakers.group_words, 화자 없이) 잰다.
 - 지표 잣대: pipelines/whisper-cpp@2/quality.py의 metrics(같은 구절 연속 반복, 같은 글자 연속, 압축률, 말 1초당 글자 수).
 - analyze.py와 같은 잠금(runlock)을 잡는다: 전사와 GPU를 같이 쓰지 않게.
+- --hints H.json: 단어장 힌트 파일(pipelines.py 약속 {prompt, fixes: [{id, wrong, right}], ids})을 손으로 써서 hints 파이프라인에 넘긴다(서버 단어장은 읽지 않음).
+  힌트 켬/끔은 설정 버전의 useHints로 가른다(같은 파이프라인의 두 설정 버전을 나란히).
 - --json은 실행 하나가 끝날 때마다 다시 쓴다(중간에 실패해도 돈 결과는 남게).
 """
 import argparse, importlib.util, json, subprocess, sys, tempfile, time
@@ -56,10 +58,10 @@ def measure(segs: list, words: bool) -> tuple:
     return shown, m
 
 
-def run_one(c: "AN.Chosen", wav: Path, words: bool) -> dict:
+def run_one(c: "AN.Chosen", wav: Path, words: bool, hints: Path | None = None) -> dict:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         t0 = time.time()
-        segs = P.run(c.pipe, c.settings, wav, Path(tmp), words=words, tools=AN.A)
+        segs = P.run(c.pipe, c.settings, wav, Path(tmp), words=words, tools=AN.A, hints=hints if P.wants_hints(c.pipe, c.settings) else None)
         sec = round(time.time() - t0, 1)
         try:
             stats = json.loads((Path(tmp) / f"{wav.stem}.segments.json").read_text(encoding="utf-8")).get("stats")
@@ -88,6 +90,7 @@ def main():
     ap.add_argument("--duration", type=float, help="이 초만큼")
     ap.add_argument("--words", action="store_true", help="단어 단위 전사(phone·call·laptop-mic과 같음)")
     ap.add_argument("--show", type=int, default=0, help="파이프라인마다 앞 N 구간을 보인다")
+    ap.add_argument("--hints", help="단어장 힌트 파일(hints 파이프라인에만, useHints가 꺼진 설정 버전은 빼고)")
     ap.add_argument("--json", help="전체 결과(구간 포함)를 이 파일로")
     a = ap.parse_args()
     try:
@@ -114,7 +117,7 @@ def main():
                 for c in chosen:
                     print(f"{label} × {c.label()} …", flush=True)
                     try:
-                        r = run_one(c, wav, a.words)
+                        r = run_one(c, wav, a.words, Path(a.hints).resolve() if a.hints else None)
                     except RuntimeError as e:   # 한 파이프라인이 실패해도 나머지는 돌고, 이미 돈 결과는 남긴다
                         print("   실패:", str(e)[-300:], flush=True)
                         continue
@@ -130,7 +133,8 @@ def main():
         for r in rows:
             print(f"\n## {r['clip']} × {r['pipeline']}#{r['settingsVersion']}")
             for s in r["segments"][:a.show]:
-                print(f"  {s['startMs'] / 1000:7.1f}–{s['endMs'] / 1000:7.1f}{' [의심]' if s.get('suspect') else ''}  {s['text']}")
+                print(f"  {s['startMs'] / 1000:7.1f}–{s['endMs'] / 1000:7.1f}{' [의심]' if s.get('suspect') else ''}  {s['text']}"
+                      + (f"  (원래: {s['original']})" if s.get("original") else ""))
 
 
 if __name__ == "__main__":

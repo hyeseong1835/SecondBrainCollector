@@ -40,6 +40,9 @@ API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrai
   --pipeline을 안 주면 whisper-cpp@1에서 전사 모델(--asr-model → settings.json의 asrModel → batisay-ko-turbo-q8_0)이 같은 설정 버전(없으면 새로 씀).
   새로 쓰는 설정 버전 번호 = (이 PC, 서버 목록 GET /api/transcription/pipelines의 그 파이프라인) 중 최대 + 1. 서버 목록을 못 읽으면(옛 서버) 경고하고 이 PC 기준.
   미전사 = 어느 파이프라인의 결과도 없는 묶음(GET /api/recordings/analyzed). 다른 파이프라인으로 다시 돌리려면 --redo·--pick.
+단어장 힌트(2026-11-16, 계획 "3-① 단어장"): 매니페스트 hints인 파이프라인이고 설정 useHints가 꺼져 있지 않으면 묶음마다 POST /api/vocab/pick
+  (통화면 caller = 통화 상대, max·maxChars = 설정 hintMax·hintChars)으로 힌트 파일을 만들어 --hints로 넘긴다. 서버를 못 읽으면 경고하고 이번 실행은 힌트 없이.
+  올리기가 성공하면 파이프라인이 낸 vocabUsed(쓴 힌트·실제로 바꾼 고침 짝 id)로 POST /api/vocab/used(묶음 하나에 한 번). --plan은 고르지 않고, --dry-run은 고르기만.
 전사 모델(--asr-model, 2026-11-13): models/ggml-*.bin 중 하나. 2026-11-16부터 whisper-cpp@1의 설정 asrModel로 바꿔 쓴다(데스크톱 호환, --pipeline whisper-cpp@1과만 같이 쓸 수 있음)
   python analyze.py --list-models   # 쓸 수 있는 모델과 기본값(JSON)
   python analyze.py --source phone --pick X.m4a --asr-model large-v3-turbo --dry-run
@@ -204,9 +207,56 @@ def server_settings_versions(p: P.Pipeline, warn) -> list:
         return []
 
 
-def transcribe(wav: Path, tmp: Path, words: bool = False):
-    """이번 실행의 파이프라인으로 wav → 구간. words=True면 단어마다 한 구간(화자 구분 assign_speakers가 화자별로 다시 묶는다)"""
-    return P.run(CHOSEN.pipe, CHOSEN.settings, wav, tmp, words=words, tools=A)
+def transcribe(wav: Path, tmp: Path, words: bool = False, hints: Path | None = None, used: set | None = None):
+    """이번 실행의 파이프라인으로 wav → 구간. words=True면 단어마다 한 구간(화자 구분 assign_speakers가 화자별로 다시 묶는다).
+    hints = 단어장 힌트 파일, used = 쓴 단어장 id를 모을 집합"""
+    return P.run(CHOSEN.pipe, CHOSEN.settings, wav, tmp, words=words, tools=A, hints=hints, used=used)
+
+
+VOCAB_OFF = False   # 단어장 고르기가 한 번 실패하면 이번 실행은 힌트 없이(묶음마다 경고하지 않게)
+
+
+def pick_body(b: "B.Bundle", settings: dict) -> dict:
+    """POST /api/vocab/pick 본문: 통화면 caller = 통화 상대, max·maxChars = 설정 hintMax·hintChars(없으면 서버 기본)"""
+    body = {}
+    if b.source == "call":
+        import speakers as sp
+        body["caller"] = sp.call_partner(b.items[0].path)
+    for key, field in (("max", "hintMax"), ("maxChars", "hintChars")):
+        if settings.get(field) is not None: body[key] = int(settings[field])
+    return body
+
+
+def hints_file(pick: dict) -> dict:
+    """/vocab/pick 응답 → 파이프라인 힌트 파일 {prompt, fixes: [{id, wrong, right}], ids}"""
+    return {"prompt": pick.get("prompt") or "", "ids": [h["id"] for h in pick.get("hints") or [] if "id" in h],
+            "fixes": [{"id": f.get("id"), "wrong": f["wrong"], "right": f["text"]} for f in pick.get("fixes") or [] if f.get("wrong") and f.get("text")]}
+
+
+def bundle_hints(call, b: "B.Bundle", tmp: Path) -> Path | None:
+    """이 묶음의 단어장 힌트 파일(tmp/hints.json). 파이프라인이 힌트를 안 받거나, 고를 것이 없거나, 서버를 못 읽으면 None"""
+    global VOCAB_OFF
+    if VOCAB_OFF or not P.wants_hints(CHOSEN.pipe, CHOSEN.settings): return None
+    try:
+        h = hints_file(call("POST", "/api/vocab/pick", pick_body(b, CHOSEN.settings)) or {})
+    except Exception as e:
+        VOCAB_OFF = True
+        print(f"  단어장을 읽지 못해 이번 실행은 힌트 없이 전사합니다: {str(e)[-200:]}", file=sys.stderr)
+        return None
+    if not h["prompt"] and not h["fixes"]: return None
+    print(f"    단어장: 힌트 {len(h['ids'])}개({h['prompt'][:60]}{'…' if len(h['prompt']) > 60 else ''}), 고침 짝 {len(h['fixes'])}개")
+    path = tmp / "hints.json"
+    path.write_text(json.dumps(h, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def mark_used(call, ids: set):
+    """올리기가 성공한 묶음에서 실제로 쓴 단어장 항목의 쓰인 횟수를 올린다(POST /api/vocab/used). 실패해도 전사는 그대로"""
+    if not ids: return
+    try:
+        call("POST", "/api/vocab/used", {"ids": sorted(ids)[:500]})
+    except Exception as e:
+        print(f"    단어장 쓰인 횟수를 올리지 못함: {str(e)[-200:]}", file=sys.stderr)
 
 
 class Llm:
@@ -378,8 +428,8 @@ def join_wavs(b: "B.Bundle", wavs: list, dst: Path) -> Path:
     return dst
 
 
-def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_summary_chars: int):
-    """묶음 하나를 전사·화자 구분(llm이 있으면 요약까지). → API 본문(segments 포함)
+def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_summary_chars: int, hints: Path | None = None, used: set | None = None):
+    """묶음 하나를 전사·화자 구분(llm이 있으면 요약까지). → API 본문(segments 포함). hints = 단어장 힌트 파일(묶음 파일마다 같은 것), used = 쓴 단어장 id를 모을 집합
     전사는 파일마다 하고 시각에 오프셋을 더한다: 무음을 채워 이어 붙인 긴 wav를 whisper.cpp VAD로 돌리면 구간 시각이 수백 초씩 어긋났다(2026-11-11 실측).
     녹음은 5초 무음 뒤에만 파일을 끊으므로 경계에서 말이 잘리는 일은 드물다. 화자 구분(sherpa)과 요약은 묶음 전체로 한 번에."""
     source, first = b.source, b.items[0]
@@ -390,7 +440,7 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
         wav = tmp / f"p{k}.wav"
         to_wav(it.path, wav)
         wavs.append(wav)
-        part = transcribe(wav, tmp, words=words_mode)
+        part = transcribe(wav, tmp, words=words_mode, hints=hints, used=used)
         off = it.start - b.start
         for s in part:
             s["startMs"] += off; s["endMs"] += off
@@ -689,9 +739,10 @@ def run_jobs(a, call, jobs, n_done, n_progress):
         for i, b in enumerate(jobs, 1):
             t0 = time.time()
             progress("start", i=i, total=len(jobs), **bundle_info(b))
+            used = set()   # 이 묶음에서 실제로 쓴 단어장 항목 id
             try:
                 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:   # 백신·색인기가 임시 파일을 잡고 있어도 멈추지 않게
-                    body = analyze_bundle(b, Path(tmp), llm, spk, a.min_summary_chars)
+                    body = analyze_bundle(b, Path(tmp), llm, spk, a.min_summary_chars, bundle_hints(call, b, Path(tmp)), used)
                 if not a.dry_run:
                     call("PUT", "/api/recordings/analysis", body)
             except Exception as e:
@@ -700,6 +751,7 @@ def run_jobs(a, call, jobs, n_done, n_progress):
                 print(f"[{i}/{len(jobs)}] {b.source} {hms(b.start)}~{hms(b.end)[6:]}  실패, 건너뜀: {msg[-300:]}", flush=True)
                 progress("error", message=f"{b.source} {hms(b.start)} 묶음 실패(건너뜀): {msg[-200:]}", **bundle_info(b))
                 continue
+            if not a.dry_run: mark_used(call, used)
             segs = body["segments"]
             print(f"[{i}/{len(jobs)}] {b.source} {hms(b.start)}~{hms(b.end)[6:]}  파일 {len(b.items)}개 {(b.end - b.start) / 1000:.0f}초"
                   f" → 말 {body['speechMs'] / 1000:.0f}초, {len(segs)}구간 ({time.time() - t0:.1f}초)")
@@ -715,7 +767,8 @@ def run_jobs(a, call, jobs, n_done, n_progress):
                     print(f"    말소리 없음 → 휴지통으로 파일 {len(moved)}개({T.TRASH_DAYS}일 뒤 영구 삭제, 녹음 화면에서 되살리기)")
                     progress("trashed", source=b.source, start=iso(b.start), files=len(moved))
             if a.dry_run:
-                for s in segs: print(f"    {s['startMs'] / 1000:7.1f}–{s['endMs'] / 1000:7.1f}  {(s['speaker'] + ': ') if s['speaker'] else ''}{s['text']}")
+                for s in segs: print(f"    {s['startMs'] / 1000:7.1f}–{s['endMs'] / 1000:7.1f}  {(s['speaker'] + ': ') if s['speaker'] else ''}{s['text']}"
+                                   + (f"  (원래: {s['original']})" if s.get("original") else ""))
                 if body["summary"]: print("  요약:", body["summary"])
         print(f"끝: 묶음 {len(jobs) - len(failed)}개 완료, 실패 {len(failed)}개" + (" — " + ", ".join(f"{x.source} {hms(x.start)}" for x in failed[:20]) if failed else ""))
         progress("end", analyzed=len(jobs) - len(failed), total=len(jobs), failed=len(failed))

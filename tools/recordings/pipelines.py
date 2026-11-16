@@ -2,9 +2,12 @@
 
 - 파이프라인 = 폴더 하나 <name>@<version>/ (pipeline.json + 스크립트). analyze.py를 고치지 않고 폴더를 넣고 빼서 추가·제거한다.
   찾는 곳(앞이 우선, 같은 이름@버전이면 사용자 폴더): %USERPROFILE%/.secondbrain/analysis/pipelines → 저장소 tools/recordings/pipelines
-- pipeline.json: {name, version, description, autoRecommend, entry, settings: {키: {type, default, label}}}
+- pipeline.json: {name, version, description, autoRecommend, entry, hints?, settings: {키: {type, default, label}}}
   type: string | number | bool | whisper-model(models/ggml-<이름>.bin, analyze.py --list-models 목록. analyze.py가 실행 전에 있는지 본다)
 - 실행: python <entry> --wav W --out O.json --settings S.json [--words] → O.json = {"segments": [{startMs, endMs, text, suspect?}]}
+  단어장 힌트(2026-11-16): 매니페스트 hints: true인 파이프라인에만 --hints H.json(H = {prompt, fixes: [{id, wrong, right}], ids})을 더 넘긴다.
+  그 파이프라인은 O.json에 vocabUsed: [단어장 항목 id](실제로 쓴 힌트·바꾼 고침 짝)를 낼 수 있고, 구간에 original(바꾸기 전 글)을 둘 수 있다.
+  설정 useHints(없으면 켬)·hintMax·hintChars는 analyze.py가 단어장 고르기(POST /api/vocab/pick)에 쓴다.
   S.json은 설정 버전 파일에 기본값을 채운 것. 환경 변수 SECONDBRAIN_ANALYSIS_TOOLS = 도구·모델 폴더(whisper.cpp·models, sbpaths.TOOLS).
 - 설정 버전: %USERPROFILE%/.secondbrain/analysis/pipeline-settings/<name>@<version>/<N>.json (N은 1부터). 한 번 쓴 파일은 고치지 않고, 바꾸면 새 번호로 쓴다.
   파이프라인 폴더의 seed-settings/<N>.json은 사용자 폴더에 그 번호가 없을 때만 베낀다(서버 기존 결과 이전과 번호를 맞추려고).
@@ -30,6 +33,7 @@ class Pipeline:
     entry: Path
     schema: dict
     folder: Path
+    hints: bool = False   # --hints(단어장 힌트 파일)를 받는가
 
     @property
     def key(self) -> str:
@@ -55,7 +59,7 @@ def load(folder: Path) -> Pipeline:
     schema = m.get("settings") or {}
     if not isinstance(schema, dict) or not all(isinstance(v, dict) for v in schema.values()):
         raise ValueError("settings는 {키: {type, default, label}} 꼴이어야 합니다")
-    return Pipeline(name, version, str(m.get("description") or ""), bool(m.get("autoRecommend")), entry, schema, folder)
+    return Pipeline(name, version, str(m.get("description") or ""), bool(m.get("autoRecommend")), entry, schema, folder, m.get("hints") is True)
 
 
 def discover(roots: list | None = None, warn=None) -> dict:
@@ -158,22 +162,31 @@ def listing(pipes: dict, root: Path | None = None) -> list:
         seed(p, root)
         vs = versions(p, root)
         out.append({"name": p.name, "version": p.version, "description": p.description, "autoRecommend": p.auto_recommend,
-                    "settingsSchema": p.schema, "settingsVersions": vs, "latestSettingsVersion": vs[-1] if vs else None, "folder": str(p.folder)})
+                    "settingsSchema": p.schema, "settingsVersions": vs, "latestSettingsVersion": vs[-1] if vs else None, "folder": str(p.folder), "hints": p.hints})
     return out
 
 
-def run(p: Pipeline, settings: dict, wav: Path, tmp: Path, words: bool = False, tools: Path | None = None) -> list:
-    """파이프라인 하나로 wav → 구간들 [{startMs, endMs, text, suspect?}]. 실패하면 RuntimeError(stderr 끝)"""
+def wants_hints(p: Pipeline, settings: dict) -> bool:
+    """이 항목으로 전사할 때 단어장 힌트를 만들어 넘길까(매니페스트 hints + 설정 useHints, 없으면 켬)"""
+    return p.hints and settings.get("useHints", True) is not False
+
+
+def run(p: Pipeline, settings: dict, wav: Path, tmp: Path, words: bool = False, tools: Path | None = None,
+        hints: Path | None = None, used: set | None = None) -> list:
+    """파이프라인 하나로 wav → 구간들 [{startMs, endMs, text, suspect?, original?}]. 실패하면 RuntimeError(stderr 끝)
+    hints = 단어장 힌트 파일(매니페스트 hints인 파이프라인에만 넘긴다). used를 주면 O.json의 vocabUsed(쓴 단어장 id)를 더한다."""
     s_path, o_path = tmp / f"{wav.stem}.settings.json", tmp / f"{wav.stem}.segments.json"
     s_path.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
     o_path.unlink(missing_ok=True)
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "SECONDBRAIN_ANALYSIS_TOOLS": str(tools or sbpaths.TOOLS)}
-    cmd = [sys.executable, str(p.entry), "--wav", str(wav), "--out", str(o_path), "--settings", str(s_path)] + (["--words"] if words else [])
+    cmd = [sys.executable, str(p.entry), "--wav", str(wav), "--out", str(o_path), "--settings", str(s_path)] + (["--words"] if words else []) + (["--hints", str(hints)] if hints and p.hints else [])
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, cwd=str(p.folder))
     if r.returncode != 0:
         raise RuntimeError(f"{p.key} 실패(종료 코드 {r.returncode}): " + (r.stderr or r.stdout)[-400:].strip())
     try:
-        segs = json.loads(o_path.read_text(encoding="utf-8-sig"))["segments"]
+        res = json.loads(o_path.read_text(encoding="utf-8-sig"))
+        segs = res["segments"]
+        if used is not None: used.update(int(x) for x in res.get("vocabUsed") or [])
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise RuntimeError(f"{p.key} 결과를 읽지 못함({o_path.name}): {e}")
     out = []
@@ -182,5 +195,6 @@ def run(p: Pipeline, settings: dict, wav: Path, tmp: Path, words: bool = False, 
         if not text: continue
         seg = {"startMs": int(s["startMs"]), "endMs": int(s["endMs"]), "speaker": None, "text": text}
         if s.get("suspect"): seg["suspect"] = True
+        if s.get("original") and str(s["original"]).strip() != text: seg["original"] = str(s["original"]).strip()
         out.append(seg)
     return out

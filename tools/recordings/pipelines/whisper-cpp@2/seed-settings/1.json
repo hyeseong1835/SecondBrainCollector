@@ -10,5 +10,9 @@
   "maxCompressionRatio": 2.4,
   "maxCharsPerSec": 15,
   "retryTemperature": 0.4,
-  "onSuspect": "mark"
+  "onSuspect": "mark",
+  "useHints": true,
+  "hintMax": 20,
+  "hintChars": 120,
+  "hintContext": 224
 }

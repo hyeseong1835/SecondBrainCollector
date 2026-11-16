@@ -6,18 +6,23 @@ import pipelines as P
 import asrmodels as M
 
 HERE = Path(__file__).parent
-# 실행 약속만 보는 가짜 파이프라인: 설정의 text를 구간 하나로, --words면 단어마다
+# 실행 약속만 보는 가짜 파이프라인: 설정의 text를 구간 하나로, --words면 단어마다. --hints면 첫 구간을 prompt로 바꾸고 ids를 vocabUsed로
 FAKE = '''import argparse, json
 ap = argparse.ArgumentParser()
 for k in ("--wav", "--out", "--settings"): ap.add_argument(k, required=True)
 ap.add_argument("--words", action="store_true")
+ap.add_argument("--hints")
 a = ap.parse_args()
 s = json.load(open(a.settings, encoding="utf-8"))
 if s.get("fail"): raise SystemExit("일부러 실패")
 words = s["text"].split() if a.words else [s["text"]]
 segs = [{"startMs": i * 100, "endMs": i * 100 + 90, "text": w} for i, w in enumerate(words)] + [{"startMs": 0, "endMs": 1, "text": "  "}]
 if s.get("suspect"): segs[0]["suspect"] = True
-open(a.out, "w", encoding="utf-8").write(json.dumps({"segments": segs, "wav": a.wav}, ensure_ascii=False))
+used = []
+if a.hints:
+    h = json.load(open(a.hints, encoding="utf-8"))
+    segs[0]["original"], segs[0]["text"], used = segs[0]["text"], h["prompt"], h["ids"]
+open(a.out, "w", encoding="utf-8").write(json.dumps({"segments": segs, "wav": a.wav, "vocabUsed": used}, ensure_ascii=False))
 '''
 
 
@@ -96,7 +101,8 @@ class PipelineTests(unittest.TestCase):
         p = P.load(make(self.repo, autoRecommend=True))
         P.write(p, {}, self.settings); P.write(p, {"text": "x"}, self.settings)
         [row] = P.listing({p.key: p}, self.settings)
-        self.assertEqual(set(row), {"name", "version", "description", "autoRecommend", "settingsSchema", "settingsVersions", "latestSettingsVersion", "folder"})
+        self.assertEqual(set(row), {"name", "version", "description", "autoRecommend", "settingsSchema", "settingsVersions", "latestSettingsVersion", "folder", "hints"})
+        self.assertFalse(row["hints"])
         self.assertEqual((row["name"], row["version"], row["autoRecommend"]), ("fake", "1", True))
         self.assertEqual((row["settingsVersions"], row["latestSettingsVersion"]), ([1, 2], 2))
         self.assertEqual(row["settingsSchema"]["text"]["default"], "안녕 하세요")
@@ -114,6 +120,23 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(words[0]["suspect"]); self.assertNotIn("suspect", words[1])
         with self.assertRaisesRegex(RuntimeError, "일부러 실패"):
             P.run(p, P.effective(p, {"fail": True}), wav, work)
+
+    def test_run_hints_only_for_hints_pipelines(self):
+        wav = self.root / "p0.wav"; wav.write_bytes(b"")
+        work = self.root / "work"; work.mkdir()
+        hints = self.root / "hints.json"
+        hints.write_text(json.dumps({"prompt": "김철수, SecondBrain", "fixes": [], "ids": [3, 8]}, ensure_ascii=False), encoding="utf-8")
+        plain = P.load(make(self.repo))
+        used = set()
+        self.assertEqual(P.run(plain, P.effective(plain, {}), wav, work, hints=hints, used=used)[0]["text"], "안녕 하세요")   # hints 아니면 안 넘김
+        self.assertEqual(used, set())
+        p = P.load(make(self.repo, "hinted", hints=True))
+        self.assertTrue(p.hints and P.wants_hints(p, {}) and P.wants_hints(p, {"useHints": True}))
+        self.assertFalse(P.wants_hints(p, {"useHints": False}) or P.wants_hints(plain, {}))
+        [seg] = P.run(p, P.effective(p, {}), wav, work, hints=hints, used=used)
+        self.assertEqual((seg["text"], seg["original"]), ("김철수, SecondBrain", "안녕 하세요"))
+        self.assertEqual(used, {3, 8})
+        self.assertNotIn("original", P.run(p, P.effective(p, {}), wav, work)[0])   # 힌트 파일 없으면 그대로
 
     def test_whisper_cpp_1_manifest(self):
         pipes = P.discover([HERE / "pipelines"])
