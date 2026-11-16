@@ -6,6 +6,7 @@
 - 묘비: <출처 폴더>\\deleted.tsv에 바로 적는다(가져오기가 다시 가져오지 않게). reason 열에 이유
 - 서버 분석(글 0자)·수집기 행·index.tsv 줄은 그대로 둔다. 7일 뒤 데스크톱 녹음 화면이 영구 삭제(서버 POST /api/recordings/delete·파일·
   index.tsv 줄·폰 원본)하고, 그 전에는 휴지통 목록에서 듣고 되살릴 수 있다(되살리기 = 파일을 제자리로·묘비 줄과 목록 줄 지움).
+- 즐겨찾기(2026-11-16, 서버 GET /api/recordings/favorites)가 든 묶음은 옮기지 않는다. 즐겨찾기를 못 읽으면 자동 이동을 아예 하지 않는다.
 """
 import datetime as dt, shutil
 from pathlib import Path
@@ -76,6 +77,16 @@ def kept(root: Path) -> set:
     if not p.exists(): return set()
     lines = p.read_text(encoding="utf-8-sig").splitlines()
     return {(c[0], c[1]) for c in (l.split("\t") for l in lines[1:]) if len(c) > 1}
+
+
+def favorites(rows) -> set:
+    """서버 즐겨찾기 줄들 → (출처, 이름). file은 접두사(call/·laptop-mic/)가 붙은 상대 경로라 이름만 쓴다."""
+    return {(r["source"], Path(r["file"]).name) for r in rows or [] if r.get("source") and r.get("file")}
+
+
+def protected(names: set, kept_set: set, fav_set: set | None) -> bool:
+    """자동 이동에서 빼는가: 되살린 것·즐겨찾기가 하나라도 있거나, 즐겨찾기를 못 읽었으면(None) 뺀다."""
+    return fav_set is None or bool(names & kept_set) or bool(names & fav_set)
 
 
 def listed(root: Path) -> set:

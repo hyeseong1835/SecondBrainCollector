@@ -432,11 +432,21 @@ def main():
         runlock.release()
 
 
+def load_favorites(call):
+    """서버 즐겨찾기 (출처, 이름). 못 읽으면 None(그러면 자동 휴지통 이동을 하지 않는다)."""
+    try:
+        return T.favorites(call("GET", "/api/recordings/favorites"))
+    except Exception as e:
+        print(f"  즐겨찾기를 읽지 못해 말소리 없는 묶음을 휴지통으로 옮기지 않습니다: {str(e)[-200:]}")
+        return None
+
+
 def sweep_silent(a, call):
     """이미 전사된 묶음 중 말소리 없는 것(서버 분석 글 0자)을 휴지통으로. 묶음 파일이 이 PC에 모두 있을 때만."""
     rows = call("GET", "/api/recordings?from=2000-01-01&to=2100-01-01") or []
     now = epoch_ms(dt.datetime.now().astimezone())
-    gone, keep = T.listed(ROOT), T.kept(ROOT)
+    gone, keep, favs = T.listed(ROOT), T.kept(ROOT), load_favorites(call)
+    if favs is None: return
     rule, local = bundle_rule(lambda path: call("GET", path)), {}
     n, n_files = 0, 0
     for r in sorted(rows, key=lambda r: r["startedAt"]):
@@ -449,7 +459,7 @@ def sweep_silent(a, call):
         paths = [ROOT / src / f["file"].removeprefix(pre) for f in files]
         names = [p.name for p in paths]
         when = r["startedAt"][:16].replace("T", " ")
-        if all((src, x) in gone for x in names) or any((src, x) in keep for x in names): continue
+        if all((src, x) in gone for x in names) or T.protected({(src, x) for x in names}, keep, favs): continue   # 되살린 것·즐겨찾기는 그대로
         missing = [x for x, p in zip(names, paths) if not p.exists()]
         if missing:
             print(f"  건너뜀 {src} {when}: 이 PC에 없는 파일 {len(missing)}개({missing[0]}…)"); continue
@@ -582,7 +592,7 @@ def run_jobs(a, call, jobs, n_done, n_progress):
             progress("done", i=i, total=len(jobs), speechMs=body["speechMs"], segments=len(segs), seconds=round(time.time() - t0, 1),
                      uploaded=not a.dry_run, **bundle_info(b))
             if (not a.no_auto_remove and b.source in T.SOURCES and T.is_silent(segs, body["transcript"])
-                    and not any((b.source, it.path.name) in T.kept(ROOT) for it in b.items)):   # 되살린 것은 그대로
+                    and not T.protected({(b.source, it.path.name) for it in b.items}, T.kept(ROOT), load_favorites(call))):   # 되살린 것·즐겨찾기(그때 읽음)는 그대로
                 if a.dry_run:
                     print(f"    말소리 없음 → 휴지통 후보(dry-run이라 옮기지 않음)")
                 else:
