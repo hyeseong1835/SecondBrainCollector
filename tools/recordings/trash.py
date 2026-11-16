@@ -8,7 +8,7 @@
   index.tsv 줄·폰 원본)하고, 그 전에는 휴지통 목록에서 듣고 되살릴 수 있다(되살리기 = 파일을 제자리로·묘비 줄과 목록 줄 지움).
 - 즐겨찾기(2026-11-16, 서버 GET /api/recordings/favorites)가 든 묶음은 옮기지 않는다. 즐겨찾기를 못 읽으면 자동 이동을 아예 하지 않는다.
 """
-import datetime as dt, shutil
+import datetime as dt, json, shutil
 from pathlib import Path
 
 TRASH_DAYS = 7
@@ -21,6 +21,25 @@ COLUMNS = ["source", "name", "file", "trashed_at", "purge_after", "reason", "rul
 def is_silent(segments: list, transcript: str) -> bool:
     """전사 결과에 말이 하나도 없는가. analyze.py는 환각 문장(HALLUCINATIONS)을 이미 걸러 segments에 넣지 않는다."""
     return not segments and not (transcript or "").strip()
+
+
+def bundle_files(row: dict) -> list:
+    """결과 행의 묶음 파일들([{file, startedAt?, endedAt?}]). files가 없으면 file 하나."""
+    files = row.get("files") or [{"file": row["file"]}]
+    return json.loads(files) if isinstance(files, str) else files
+
+
+def silent_bundles(rows: list) -> list:
+    """전사 파이프라인(2026-11-16): 한 녹음에 결과가 여럿(행 = 결과 하나)일 수 있다. 말소리 없는 결과 중
+    어느 결과에서든 말이 나온 파일이 든 것은 빼고, 같은 묶음(출처, 첫 파일)은 한 번만. → 시작 순 행들"""
+    spoken = {(r.get("source"), f["file"]) for r in rows if not is_silent(r.get("segments") or [], r.get("transcript")) for f in bundle_files(r)}
+    out, seen = [], set()
+    for r in sorted(rows, key=lambda r: r["startedAt"]):
+        key = (r.get("source"), r["file"])
+        if key in seen or not is_silent(r.get("segments") or [], r.get("transcript")): continue
+        if any((r.get("source"), f["file"]) in spoken for f in bundle_files(r)): continue
+        seen.add(key); out.append(r)
+    return out
 
 
 def trash_dir(root: Path) -> Path:

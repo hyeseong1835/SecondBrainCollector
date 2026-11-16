@@ -24,6 +24,23 @@ class TrashTests(unittest.TestCase):
         self.assertTrue(T.is_silent([], "  "))
         self.assertFalse(T.is_silent([{"text": "어."}], "어."))
 
+    def test_silent_bundles_across_pipeline_results(self):
+        def row(file, start, text, files=None, src="phone"):
+            r = {"source": src, "file": file, "startedAt": start, "transcript": text, "segments": [{"text": text}] if text else []}
+            if files is not None: r["files"] = files
+            return r
+        rows = [
+            row("a.m4a", "2026-11-11T09:00", ""),                                  # whisper-cpp@1 설정 1: 말 없음
+            row("a.m4a", "2026-11-11T09:00", "", '[{"file": "a.m4a"}]'),            # 설정 2도 말 없음(files가 글로 와도) → 한 번만
+            row("b.m4a", "2026-11-11T10:00", ""),                                  # 다른 결과에 말 있음 → 뺌
+            row("b.m4a", "2026-11-11T10:00", "네."),
+            row("c.m4a", "2026-11-11T11:00", "", [{"file": "c.m4a"}, {"file": "d.m4a"}]),
+            row("d.m4a", "2026-11-11T11:05", "어."),                               # 다른 묶음 키지만 같은 파일에 말 → 뺌
+            row("e.m4a", "2026-11-11T08:00", "", src="laptop-mic"),
+            row("e.m4a", "2026-11-11T08:00", "음.", src="phone"),                  # 출처가 다르면 상관없음
+        ]
+        self.assertEqual([(r["source"], r["file"]) for r in T.silent_bundles(rows)], [("laptop-mic", "e.m4a"), ("phone", "a.m4a")])
+
     def test_move_bundle(self):
         moved = T.move_bundle(self.root, "phone", self.files, "2026-11-11T09:00:00+09:00", NOW, spans=[("s1", "e1"), ("s2", "e2")])
         self.assertEqual(moved, ["2026-11-11/20261111-090000-aaaa.m4a", "2026-11-11/20261111-090040-bbbb.m4a"])
