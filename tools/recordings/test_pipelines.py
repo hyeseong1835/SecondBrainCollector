@@ -194,5 +194,45 @@ class ChooseTests(unittest.TestCase):
         self.assertEqual(self.choose("fake@1").settings["text"], "새")
 
 
+class RedoTests(unittest.TestCase):
+    """analyze --redo-from(데스크톱 전체 재전사)과 미전사 판단"""
+    def setUp(self):
+        import analyze, argparse, types
+        self.A, self.ns = analyze, types.SimpleNamespace
+        self.argparse = argparse
+        # 서버 GET /api/recordings/analyzed?device[&pipeline&version&settingsVersion]
+        self.analyzed = {"": ["a1", "a2", "b1", "c1"], "whisper-cpp|1|1": ["a1", "a2"], "whisper-cpp|1|2": ["c1"]}
+        self.calls = []
+
+    def get(self, path):
+        self.calls.append(path)
+        from urllib.parse import urlparse, parse_qs
+        q = {k: v[0] for k, v in parse_qs(urlparse(path).query).items()}
+        self.assertEqual(q["device"], "phone")
+        return self.analyzed.get("|".join(q[k] for k in ("pipeline", "version", "settingsVersion")) if "pipeline" in q else "", [])
+
+    def bundles(self):
+        it = lambda rel: self.ns(rel=rel)
+        return {k: self.ns(items=[it(x) for x in v]) for k, v in {"A": ["a1", "a2"], "B": ["b1", "b2"], "C": ["c1"], "D": ["d1"]}.items()}
+
+    def pick(self, redo=False, redo_from=None):
+        want = self.A.wanted(self.ns(redo=redo, redo_from=redo_from), self.get, "phone")
+        return sorted(k for k, b in self.bundles().items() if want(b))
+
+    def test_parse(self):
+        self.assertEqual(self.A.redo_entry("whisper-cpp@1#2"), ("whisper-cpp", "1", 2))
+        self.assertEqual(self.A.redo_entry("sense-voice@0.2#10"), ("sense-voice", "0.2", 10))
+        for bad in ("whisper-cpp@1", "whisper-cpp#1", "whisper-cpp@1#0", "whisper-cpp@1#x", "a@b@c#1"):
+            with self.assertRaises(self.argparse.ArgumentTypeError): self.A.redo_entry(bad)
+
+    def test_selection(self):
+        self.assertEqual(self.pick(), ["B", "D"])                       # 미전사 = 파일 하나라도 어느 결과에도 없음
+        self.assertEqual(self.pick(redo=True), ["A", "B", "C", "D"])    # 예전 --redo
+        self.assertEqual(self.pick(True, [("whisper-cpp", "1", 1)]), ["A"])
+        self.assertEqual(self.pick(True, [("whisper-cpp", "1", 1), ("whisper-cpp", "1", 2)]), ["A", "C"])
+        self.assertEqual(self.pick(True, [("nope", "1", 1)]), [])
+        self.assertIn("&pipeline=nope&version=1&settingsVersion=1", self.calls[-1])
+
+
 if __name__ == "__main__":
     unittest.main()

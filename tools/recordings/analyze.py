@@ -6,6 +6,7 @@
   python analyze.py --file X.m4a --dry-run   # 그 파일이 든 묶음 하나 시험(올리지 않음)
   python analyze.py --source phone --limit 2 --dry-run
   python analyze.py --redo          # 이미 분석한 것도 다시
+  python analyze.py --redo --redo-from whisper-cpp@1#1 --pipeline whisper-cpp@2   # 그 파이프라인 항목(여러 번 줄 수 있음)의 결과가 있는 묶음만 다시(데스크톱 전체 재전사)
   python analyze.py --source phone --pick 20261111-140200.m4a   # 그 파일이 든 묶음 하나(이미 분석했어도 다시)
   python analyze.py --call 20261111-224007-ab12cd34.m4a   # 그 파일이 든 디스코드 통화(디스코드 일반 녹음+노트북 마이크)의 미전사 묶음 전부(--redo면 전부)
   python analyze.py --progress-json # 사람이 읽는 줄 사이에 "@@progress {json}" 줄(데스크톱 녹음 화면이 읽음)
@@ -436,6 +437,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="분석은 하되 올리지 않는다")
     ap.add_argument("--plan", action="store_true", help="묶음과 상태만 보이고 분석하지 않는다")
     ap.add_argument("--redo", action="store_true", help="이미 분석한 묶음도 다시")
+    ap.add_argument("--redo-from", action="append", type=redo_entry, metavar="NAME@VERSION#N",
+                    help="--redo와 함께: 이 파이프라인 항목의 결과가 있는 묶음만 다시(여러 번 줄 수 있음, 새 결과는 --pipeline으로)")
     ap.add_argument("--limit", type=int, help="묶음 최대 N개만")
     ap.add_argument("--stage", choices=("transcribe", "all"), default="transcribe", help="transcribe = 전사·화자 구분만(기본), all = 요약까지")
     ap.add_argument("--min-summary-chars", type=int, default=60)
@@ -476,6 +479,7 @@ def main():
                 progress("error", message=str(e)); print(e); sys.exit(2)
             print("  (파이프라인을 고르지 못함:", str(e) + ")")
     if a.pick and not a.source: ap.error("--pick에는 --source가 필요합니다")
+    if a.redo_from and not a.redo: ap.error("--redo-from에는 --redo가 필요합니다")
     if a.call and (a.pick or a.file or a.source): ap.error("--call은 --pick·--file·--source와 함께 쓸 수 없습니다")
     if not a.plan:
         busy = runlock.acquire(sys.argv[1:])
@@ -510,7 +514,7 @@ def all_silent(call, device: str, file: str) -> bool:
         print(f"  전사 결과를 읽지 못해 휴지통으로 옮기지 않습니다: {str(e)[-200:]}")
         return False
     rows = rows if isinstance(rows, list) else [rows] if rows else []
-    return all(T.is_silent(r.get("segments") or [], r.get("transcript")) for r in rows)
+    return bool(rows) and all(T.is_silent(r.get("segments") or [], r.get("transcript")) for r in rows)   # 결과 없음([])이면 옮기지 않음
 
 
 def sweep_silent(a, call):
@@ -583,9 +587,9 @@ def run(a):
                         continue
                 jobs.append(b)
             continue
-        done = set() if a.redo else set(get("/api/recordings/analyzed?device=" + urllib.parse.quote(SOURCES[folder])) or [])
+        want = wanted(a, get, SOURCES[folder])
         for b in bundles:
-            state = "진행 중" if B.in_progress(b, now, rule) else "분석됨" if all(it.rel in done for it in b.items) else "분석할 것"
+            state = "진행 중" if B.in_progress(b, now, rule) else "분석할 것" if want(b) else "분석됨"
             if a.plan:
                 print(f"  {folder:14} {hms(b.start)} ~ {hms(b.end)[6:]}  파일 {len(b.items):3}개  {state}")
             if state == "진행 중": n_progress += 1
@@ -596,6 +600,31 @@ def run(a):
         progress("missing", file=a.file or a.pick, source=a.source)
         print("그 파일이 든 묶음을 찾지 못했습니다(이 PC의 녹음 폴더에 파일이 없음):", a.file or f"{a.source}/{a.pick}")
     return run_jobs(a, call, jobs, n_done, n_progress)
+
+
+def redo_entry(text: str) -> tuple:
+    """--redo-from 'name@version#n' → (name, version, n)"""
+    key, _, n = text.strip().rpartition("#")
+    try:
+        name, version = P.parse_key(key)
+        if not n.isdigit() or int(n) < 1: raise ValueError
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"<이름>@<버전>#<설정 버전> 꼴이어야 합니다: {text}")
+    return name, version, int(n)
+
+
+def wanted(a, get, device: str):
+    """이 기기 묶음 중 전사할 것을 고르는 함수(묶음 → bool).
+    --redo-from: 그 항목들의 결과에 든 파일이 하나라도 있는 묶음만. --redo: 전부. 아니면 어느 파이프라인 결과도 없는 묶음(파일 하나라도 빠졌으면)."""
+    if a.redo and not a.redo_from: return lambda b: True
+    q = "/api/recordings/analyzed?device=" + urllib.parse.quote(device)
+    if a.redo_from:
+        hit = set()
+        for name, version, n in a.redo_from:
+            hit |= set(get(q + f"&pipeline={urllib.parse.quote(name)}&version={urllib.parse.quote(version)}&settingsVersion={n}") or [])
+        return lambda b: any(it.rel in hit for it in b.items)
+    done = set(get(q) or [])
+    return lambda b: not all(it.rel in done for it in b.items)
 
 
 def call_jobs(a, get, rule, now):
@@ -618,11 +647,8 @@ def call_jobs(a, get, rule, now):
         progress("refused", reason="in-progress", **bundle_info(late[0]))
         print(f"아직 녹음이 이어질 수 있는 통화라 전사하지 않습니다(마지막 파일 뒤 {rule['gapSec']}초가 지나지 않음).")
         sys.exit(4)
-    done = set()
-    if not a.redo:
-        for dev in sorted({SOURCES[b.source] for b in found}):
-            done |= set(get("/api/recordings/analyzed?device=" + urllib.parse.quote(dev)) or [])
-    jobs = [b for b in found if a.redo or not all(it.rel in done for it in b.items)]
+    want = {dev: wanted(a, get, dev) for dev in sorted({SOURCES[b.source] for b in found})}
+    jobs = [b for b in found if want[SOURCES[b.source]](b)]
     return jobs, len(found) - len(jobs), 0
 
 
