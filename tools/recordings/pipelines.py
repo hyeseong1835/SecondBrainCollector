@@ -11,8 +11,11 @@
   S.json은 설정 버전 파일에 기본값을 채운 것. 환경 변수 SECONDBRAIN_ANALYSIS_TOOLS = 도구·모델 폴더(whisper.cpp·models, sbpaths.TOOLS).
 - 설정 버전: %USERPROFILE%/.secondbrain/analysis/pipeline-settings/<name>@<version>/<N>.json (N은 1부터). 한 번 쓴 파일은 고치지 않고, 바꾸면 새 번호로 쓴다.
   파이프라인 폴더의 seed-settings/<N>.json은 사용자 폴더에 그 번호가 없을 때만 베낀다(서버 기존 결과 이전과 번호를 맞추려고).
+진행도(2026-11-17): 파이프라인은 표준 출력에 한 줄 `@@progress {"percent": 0~100, "text": "글"}`(둘 다 선택)을 낼 수 있다. run()이 줄 단위로 읽어 on_progress(percent·text 딕셔너리)로 넘긴다.
+  percent = 그 파이프라인이 맡은 wav 하나 안의 진행. 다른 표준 출력 줄·깨진 줄은 무시, 로그는 표준 오류로. 진행도를 안 내도 그대로 돈다. 너무 잦은 것은 Throttle이 거른다.
 """
-import json, os, re, shutil, subprocess, sys
+import json, os, re, shutil, subprocess, sys, threading, time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -171,18 +174,68 @@ def wants_hints(p: Pipeline, settings: dict) -> bool:
     return p.hints and settings.get("useHints", True) is not False
 
 
+PROGRESS_PREFIX = "@@progress "
+PROGRESS_GAP = 0.25   # 초당 4번 넘게 넘기지 않는다
+
+
+def parse_progress(line: str) -> dict | None:
+    """파이프라인 표준 출력 한 줄 → {"percent"?: 0~100 실수, "text"?: 글}. 약속의 줄이 아니거나 JSON이 깨졌거나 객체가 아니거나 쓸 값이 없으면 None.
+    percent는 숫자(bool·NaN 아님)만 0~100으로 자르고, text는 문자열만(앞뒤 공백을 떼고, 비면 생략). 잘못된 한쪽은 버리고 다른 쪽만 쓴다."""
+    if not line.startswith(PROGRESS_PREFIX): return None
+    try:
+        raw = json.loads(line[len(PROGRESS_PREFIX):])
+    except ValueError:
+        return None
+    if not isinstance(raw, dict): return None
+    out = {}
+    pct = raw.get("percent")
+    if isinstance(pct, (int, float)) and not isinstance(pct, bool) and pct == pct:
+        out["percent"] = min(100.0, max(0.0, float(pct)))
+    text = raw.get("text")
+    if isinstance(text, str) and text.strip(): out["text"] = text.strip()
+    return out or None
+
+
+class Throttle:
+    """ok()가 PROGRESS_GAP초에 한 번만 True(처음은 True). 거른 것은 버린다(다음 것이 최신 값을 싣는다)"""
+    def __init__(self, gap: float = PROGRESS_GAP, clock=time.monotonic):
+        self.gap, self.clock, self.last = gap, clock, None
+
+    def ok(self) -> bool:
+        now = self.clock()
+        if self.last is not None and now - self.last < self.gap: return False
+        self.last = now
+        return True
+
+
 def run(p: Pipeline, settings: dict, wav: Path, tmp: Path, words: bool = False, tools: Path | None = None,
-        hints: Path | None = None, used: set | None = None) -> list:
+        hints: Path | None = None, used: set | None = None, on_progress=None) -> list:
     """파이프라인 하나로 wav → 구간들 [{startMs, endMs, text, suspect?, original?}]. 실패하면 RuntimeError(stderr 끝)
-    hints = 단어장 힌트 파일(매니페스트 hints인 파이프라인에만 넘긴다). used를 주면 O.json의 vocabUsed(쓴 단어장 id)를 더한다."""
+    hints = 단어장 힌트 파일(매니페스트 hints인 파이프라인에만 넘긴다). used를 주면 O.json의 vocabUsed(쓴 단어장 id)를 더한다.
+    on_progress = 파이프라인이 낸 @@progress 줄마다 부르는 함수(parse_progress의 딕셔너리, 거르지 않음)."""
     s_path, o_path = tmp / f"{wav.stem}.settings.json", tmp / f"{wav.stem}.segments.json"
     s_path.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
     o_path.unlink(missing_ok=True)
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "SECONDBRAIN_ANALYSIS_TOOLS": str(tools or sbpaths.TOOLS)}
     cmd = [sys.executable, str(p.entry), "--wav", str(wav), "--out", str(o_path), "--settings", str(s_path)] + (["--words"] if words else []) + (["--hints", str(hints)] if hints and p.hints else [])
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, cwd=str(p.folder))
-    if r.returncode != 0:
-        raise RuntimeError(f"{p.key} 실패(종료 코드 {r.returncode}): " + (r.stderr or r.stdout)[-400:].strip())
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=env, cwd=str(p.folder))
+    err, other = [], deque(maxlen=20)   # 표준 오류는 따로 읽어(안 읽으면 가득 차 멈춘다) 끝만 남긴다
+    reader = threading.Thread(target=lambda: err.extend(deque(proc.stderr, maxlen=20)), daemon=True)
+    reader.start()
+    try:
+        for line in proc.stdout:
+            ev = parse_progress(line)
+            if ev is None:
+                if not line.startswith(PROGRESS_PREFIX): other.append(line)
+            elif on_progress:
+                on_progress(ev)
+        returncode = proc.wait()
+    finally:
+        if proc.poll() is None: proc.kill()
+        reader.join()
+        proc.stdout.close(); proc.stderr.close()
+    if returncode != 0:
+        raise RuntimeError(f"{p.key} 실패(종료 코드 {returncode}): " + ("".join(err) or "".join(other))[-400:].strip())
     try:
         res = json.loads(o_path.read_text(encoding="utf-8-sig"))
         segs = res["segments"]

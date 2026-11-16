@@ -10,6 +10,7 @@
   python analyze.py --source phone --pick 20261111-140200.m4a   # 그 파일이 든 묶음 하나(이미 분석했어도 다시)
   python analyze.py --call 20261111-224007-ab12cd34.m4a   # 그 파일이 든 디스코드 통화(디스코드 일반 녹음+노트북 마이크)의 미전사 묶음 전부(--redo면 전부)
   python analyze.py --progress-json # 사람이 읽는 줄 사이에 "@@progress {json}" 줄(데스크톱 녹음 화면이 읽음)
+    전사 중에는 파이프라인이 낸 진행(pipelines.py 머리말)을 이어 받아 {"event":"step","stage":"transcribe","file":k,"files":n,"percent":0~100,"text":"…"}(percent·text는 있을 때만, 초당 4번까지)
   python analyze.py --source phone --pick X.m4a --only-new   # 이미 전사된 묶음이면 건너뜀(데스크톱 전사 대기열이 씀)
 
 동시 실행 막기(runlock.py): %USERPROFILE%/.secondbrain/analysis/analyze.lock + 명령줄에 analyze.py가 든 다른 python 프로세스. 이미 돌고 있으면 종료 코드 3.
@@ -209,10 +210,17 @@ def server_settings_versions(p: P.Pipeline, warn) -> list:
         return []
 
 
-def transcribe(wav: Path, tmp: Path, words: bool = False, hints: Path | None = None, used: set | None = None):
+def transcribe(wav: Path, tmp: Path, words: bool = False, hints: Path | None = None, used: set | None = None, on_progress=None):
     """이번 실행의 파이프라인으로 wav → 구간. words=True면 단어마다 한 구간(화자 구분 assign_speakers가 화자별로 다시 묶는다).
-    hints = 단어장 힌트 파일, used = 쓴 단어장 id를 모을 집합"""
-    return P.run(CHOSEN.pipe, CHOSEN.settings, wav, tmp, words=words, tools=A, hints=hints, used=used)
+    hints = 단어장 힌트 파일, used = 쓴 단어장 id를 모을 집합, on_progress = 파이프라인이 낸 진행(percent·text)을 받는 함수"""
+    return P.run(CHOSEN.pipe, CHOSEN.settings, wav, tmp, words=words, tools=A, hints=hints, used=used, on_progress=on_progress)
+
+
+def transcribe_reporter(file: int, files: int):
+    """파이프라인 진행을 --progress-json step 이벤트로 넘기는 함수(파일마다 새로, 초당 4번까지). --progress-json이 아니면 None"""
+    if not PROGRESS: return None
+    gate = P.Throttle()
+    return lambda ev: progress("step", stage="transcribe", file=file, files=files, **ev) if gate.ok() else None
 
 
 VOCAB_OFF = False   # 단어장 고르기가 한 번 실패하면 이번 실행은 힌트 없이(묶음마다 경고하지 않게)
@@ -450,7 +458,7 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
         wav = tmp / f"p{k}.wav"
         to_wav(it.path, wav)
         wavs.append(wav)
-        part = transcribe(wav, tmp, words=words_mode, hints=hints, used=used)
+        part = transcribe(wav, tmp, words=words_mode, hints=hints, used=used, on_progress=transcribe_reporter(k + 1, len(b.items)))
         off = it.start - b.start
         for s in part:
             s["startMs"] += off; s["endMs"] += off
