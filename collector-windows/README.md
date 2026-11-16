@@ -103,3 +103,9 @@ powershell -ExecutionPolicy Bypass -File scripts\verify.ps1 -Restore   # 빌드 
 - 기록: `link`(붙어 있던 동안·재연결 수·clock_offset_ms = 폰 − 노트북), `rssi`(10초마다 RSSI 중앙값·최소·최대, 거리는 이것으로만 보인다. 옛 `proximity` 거리 구간 출력은 2026-11-15에 없앴고 저장된 행은 남는다). 장소 이름 없음.
 - 보정: `phone-link-calibrate [초] [--at 거리m]`(수집기가 돌고 있을 때). 기본 ref_rssi_1m −53은 S26 Ultra·이 노트북으로 잰 값. 화면의 "약 몇 m" 추정에만 쓴다.
 - 시험: `phone-link-test [초]`(DB 없이 소스만, 이벤트를 찍음).
+
+## 네트워크 (2026-11-16)
+- 소스 `network`(`NetworkSource`), 플러그인 `win-network`: 노트북의 대표 네트워크(인터넷 연결 프로필의 어댑터, 없으면 게이트웨이 있는 유선→와이파이)를 30초마다·주소가 바뀔 때 읽어 `connection` 구간으로 남긴다.
+  `net_key` = 와이파이 `wifi:<SSID>`, 유선 `lan:<게이트웨이 MAC>`(ARP 실패 시 `lan-ip:<IP>`). SSID는 WinRT `GetConnectedSsid`, 비면 프로필 이름(24H2 위치 권한 없을 때).
+- 설치 설정 `zones`(JSON 문자열, `x-ui: network-zones`): 네트워크별 거리 구간. 수집기는 읽지 않고 웹 설정 › 네트워크별 거리 구간이 쓰고, 웹·데스크톱 화면이 RSSI를 구간 이름으로 바꿔 보인다.
+- 시험: `network-test`(지금 값 한 줄), `node --test tools/plugin-tests/win-network.test.mjs`.
