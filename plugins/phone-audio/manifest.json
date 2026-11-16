@@ -1,7 +1,7 @@
 {
   "type": "collector",
   "id": "phone-audio",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "녹음",
   "min_host_version": 1,
   "platforms": [
@@ -20,7 +20,7 @@
     {
       "name": "recording",
       "kind": "span",
-      "schema_version": 1,
+      "schema_version": 2,
       "columns": {
         "file": "text",
         "bytes": "bigint",
@@ -29,7 +29,13 @@
         "duration_ms": "bigint",
         "mean_db": "double precision",
         "peak_db": "double precision",
-        "floor_db": "double precision"
+        "floor_db": "double precision",
+        "input_type": "integer",
+        "input_type_name": "text",
+        "input_product": "text",
+        "input_address": "text",
+        "input_id": "integer",
+        "input_changed": "boolean"
       },
       "label": "file",
       "identity": [
