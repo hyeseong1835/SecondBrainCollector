@@ -30,6 +30,8 @@
   call/            삼성 통화 녹음(pull-call-recordings.ps1이 가져옴). 기기 phone, file은 "call/<날짜>/통화 <상대>_<YYMMDD>_<HHMMSS>.m4a"
   laptop-mic/      노트북 마이크 상시 녹음(데스크톱 수집기). 기기 laptop, file은 "laptop-mic/<날짜>/<이름>.m4a". 기숙사에선 룸메이트 목소리도 잡혀 화자 구분 대상
 화자 구분: speakers.py(sherpa-onnx). phone·call·laptop-mic. '나' 기준은 python speakers.py enroll로 먼저 만든다(없으면 화자1·화자2…만)
+  사람 목소리(2026-11-16, voices.py, 이 PC의 models/diar/voices/에만): 통화 전사 때 상대 목소리를 자동 등록(--dry-run이면 안 함),
+  폰·노트북 마이크 녹음의 화자N은 등록된 목소리와 견줘 이름(덜 닮으면 구간에 speakerGuess: true, 서버는 아직 이 필드를 저장하지 않음). 목록·지우기: python speakers.py voices / forget
 도구·모델: %LOCALAPPDATA%/SecondBrain/analysis (whisper.cpp Vulkan 빌드, ffmpeg, llama.cpp Vulkan, 모델들)
   전사 모델은 고를 수 있다(asrmodels.py, 기본 batisay-ko-turbo q8_0) + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
 API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrain/api.json, sbpaths.py)의 url·key(훅 키). 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 있으면 그것(시험 인스턴스)
@@ -227,20 +229,28 @@ class Llm:
 SPEAKER_SOURCES = ("phone", "call", "laptop-mic")   # 화자 구분(speakers.py)을 하는 원천. 전사를 단어 단위로 받는다
 
 
-def assign_speakers(source: str, f: Path, wav: Path, words: list, state: dict):
+def assign_speakers(source: str, f: Path, wav: Path, words: list, state: dict, rel: str | None = None, at: str | None = None):
     """단어 구간(transcribe(words=True))에 화자를 붙이고 화자·틈 단위로 다시 묶는다. 통화는 나·상대 이름, 폰 녹음은 나·화자1·화자2….
-    sherpa-onnx나 모델이 없으면 화자 없이 묶기만 한다. → (구간들, 통화 상대 이름 또는 None)"""
+    사람 목소리(speakers.apply_voices, 2026-11-16): 통화면 상대 목소리를 이 PC에 등록, 대면 녹음이면 화자N에 등록된 이름(덜 닮으면 구간 speakerGuess).
+    state["save"]가 False(dry-run)면 목소리 저장소를 바꾸지 않는다. sherpa-onnx나 모델이 없으면 화자 없이 묶기만 한다. → (구간들, 통화 상대 이름 또는 None)"""
     import speakers as sp   # numpy만 쓴다. sherpa-onnx는 Diarizer가 부를 때
     partner = sp.call_partner(f) if source == "call" else None
     if words and "d" not in state:
         try:
-            state["d"], state["me"] = sp.Diarizer(), sp.Me.load()
+            state["d"], state["me"], state["voices"] = sp.Diarizer(), sp.Me.load(), sp.V.Store(sp.VOICES)
             if state["me"] is None: print("  ('나' 기준 없음: python speakers.py enroll)")
         except Exception as e:
             print("  화자 구분 건너뜀:", e); state["d"] = None
     if words and state.get("d"):
         turns, embs = state["d"].diarize(sp.load_wav(wav))   # 화자 수는 정하지 않는다(잘게 나눈 뒤 name_clusters가 합친다)
-        sp.label_segments(words, turns, sp.name_clusters(embs, state["me"], turns, partner))
+        names, guessed = sp.name_clusters(embs, state["me"], turns, partner), set()
+        if state["me"] is not None:   # '나'를 못 가르면 상대 목소리도 못 고른다
+            try:
+                names, guessed, msg = sp.apply_voices(state["voices"], source, rel or f.name, at, turns, embs, names, state["me"], partner, save=state.get("save", True))
+                print("  " + msg)
+            except Exception as e:
+                print("  목소리 대조 건너뜀:", e)
+        sp.label_segments(words, turns, names, guessed)
     segs = [s for s in sp.group_words(words) if not HALLUCINATIONS.match(s["text"])]
     return segs, partner
 
@@ -387,7 +397,7 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
     if words_mode:
         progress("step", stage="speakers")
         whole = wavs[0] if len(wavs) == 1 else join_wavs(b, wavs, tmp / "bundle.wav")
-        segs, partner = assign_speakers(source, first.path, whole, segs, spk)
+        segs, partner = assign_speakers(source, first.path, whole, segs, spk, rel=first.rel, at=iso(b.start))
     transcript = " ".join(s["text"] for s in segs)
     speech = sum(s["endMs"] - s["startMs"] for s in segs)
     context = None
@@ -669,7 +679,7 @@ def run_jobs(a, call, jobs, n_done, n_progress):
             sys.exit(f"전사 파이프라인을 서버 목록에 등록하지 못했습니다({CHOSEN.pipe.key} 설정 {CHOSEN.settings_version}): {str(e)[-200:]}")
 
     llm = Llm() if a.stage == "all" else None
-    spk = {}
+    spk = {"save": not a.dry_run}   # 화자 분리기·'나'·목소리 저장소(처음 쓸 때 읽음)
     failed = []   # 묶음 하나가 실패해도(GPU 메모리 부족·깨진 파일 등) 나머지는 계속한다(2026-11-12). 다음 실행 때 다시 시도된다
     try:
         for i, b in enumerate(jobs, 1):
@@ -701,7 +711,7 @@ def run_jobs(a, call, jobs, n_done, n_progress):
                     print(f"    말소리 없음 → 휴지통으로 파일 {len(moved)}개({T.TRASH_DAYS}일 뒤 영구 삭제, 녹음 화면에서 되살리기)")
                     progress("trashed", source=b.source, start=iso(b.start), files=len(moved))
             if a.dry_run:
-                for s in segs: print(f"    {s['startMs'] / 1000:7.1f}–{s['endMs'] / 1000:7.1f}  {(s['speaker'] + ': ') if s['speaker'] else ''}{s['text']}")
+                for s in segs: print(f"    {s['startMs'] / 1000:7.1f}–{s['endMs'] / 1000:7.1f}  {(s['speaker'] + ('(추정)' if s.get('speakerGuess') else '') + ': ') if s['speaker'] else ''}{s['text']}")
                 if body["summary"]: print("  요약:", body["summary"])
         print(f"끝: 묶음 {len(jobs) - len(failed)}개 완료, 실패 {len(failed)}개" + (" — " + ", ".join(f"{x.source} {hms(x.start)}" for x in failed[:20]) if failed else ""))
         progress("end", analyzed=len(jobs) - len(failed), total=len(jobs), failed=len(failed))
