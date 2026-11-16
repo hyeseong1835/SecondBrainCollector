@@ -46,7 +46,8 @@ static class DiscordCli
         string id, name;
         using (var en = new MMDeviceEnumerator())
         using (var d = DiscordOutputSource.FindDevice(en, key)) { id = d.ID; name = d.FriendlyName; }
-        // 이름은 언어·드라이버 갱신으로 바뀔 수 있어 ID를 저장한다
+        // 이름은 언어·드라이버 갱신으로 바뀔 수 있어 ID를 저장한다. 이름은 드라이버를 다시 깔아 ID가 바뀔 때 찾는 데 쓴다
+        await SetSettingAsync(DiscordSettings.OutputPlugin, "output_device_name", JsonValue.Create(name), reload: false);
         await SetSettingAsync(DiscordSettings.OutputPlugin, "output_device", JsonValue.Create(id));
         Console.WriteLine($"상시 녹음 장치: {name}\n    {id}");
         return 0;

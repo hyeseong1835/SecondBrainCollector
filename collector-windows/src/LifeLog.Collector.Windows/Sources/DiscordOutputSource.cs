@@ -53,20 +53,26 @@ public sealed class DiscordOutputSource : ISource
         }
     }
 
-    public static MMDevice FindDevice(MMDeviceEnumerator en, string key)
+    /// <summary>ID → 이름 일부 → <paramref name="lastName"/>(기억한 이름, 정확히 같을 때만) 순서로 찾는다. 드라이버를 다시 깔면 ID가 바뀌어도 이름은 남는다.</summary>
+    public static MMDevice FindDevice(MMDeviceEnumerator en, string key, string? lastName = null)
     {
         var all = en.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
-        var hit = all.FirstOrDefault(d => d.ID == key) ?? all.FirstOrDefault(d => d.FriendlyName.Contains(key, StringComparison.OrdinalIgnoreCase));
+        var hit = all.FirstOrDefault(d => d.ID == key) ?? all.FirstOrDefault(d => d.FriendlyName.Contains(key, StringComparison.OrdinalIgnoreCase))
+            ?? (string.IsNullOrEmpty(lastName) ? null : all.FirstOrDefault(d => d.FriendlyName == lastName));
         foreach (var d in all) if (d != hit) d.Dispose();
-        return hit ?? throw new InvalidOperationException($"출력 장치 '{key}'가 없습니다(꺼졌거나 이름이 바뀜). `secondbrain-collector discord-devices`로 확인");
+        return hit ?? throw new InvalidOperationException($"출력 장치 '{(string.IsNullOrEmpty(lastName) ? key : lastName)}'가 없습니다(꺼졌거나 이름이 바뀜). `secondbrain-collector discord-devices`로 확인");
     }
 
     private void CaptureOnce()
     {
-        var key = DiscordSettings.Load().OutputDevice;
+        var set = DiscordSettings.Load();
+        var key = set.OutputDevice;
         if (string.IsNullOrWhiteSpace(key)) throw new InvalidOperationException("장치가 정해지지 않았습니다. 데스크톱 설정 › 플러그인 › 디스코드 출력 녹음에서 고르세요");
         using var en = new MMDeviceEnumerator();
-        using var device = FindDevice(en, key);
+        using var device = FindDevice(en, key, set.OutputDeviceName);
+        if (device.ID != key && device.FriendlyName == set.OutputDeviceName) _log($"[discord-output] 장치 ID가 바뀌어 이름({device.FriendlyName})으로 찾았습니다. 새 ID를 저장합니다");
+        DiscordSettings.RememberOutputDevice(device.ID, device.FriendlyName);
+        key = device.ID;
         var settingsSig = DiscordSettings.Signature;
         WasapiSegmentCapture.Run(device, loopback: true, new Segmenter(Folder, "discord-output", _emit!, _log), "discord-output", _log, _cts.Token, () =>
         {

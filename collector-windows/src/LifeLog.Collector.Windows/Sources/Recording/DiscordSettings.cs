@@ -10,6 +10,7 @@ namespace LifeLog.Collector.Windows.Sources.Recording;
 /// <summary>
 /// 디스코드 녹음 설정(2026-11-11 플러그인 설정으로 옮김). 원본은 이 기기의 플러그인 설치 설정(DB)과 로컬 비밀값 저장소다.
 /// - win-discord-output 설정 `output_device`: 상시 녹음할 렌더 장치 ID(비면 소스가 쉰다)
+///   `output_device_name`: 그 장치의 이름(2026-11-16, 화면에는 없음). 드라이버를 다시 깔아 ID가 바뀌면 이 이름으로 찾는다(<see cref="RememberOutputDevice"/>)
 /// - win-discord-bot 설정 `enabled`(봇 녹음 켬), `auto_only`(자동: 등록한 서버·채널에서만), `auto_targets`(자동 목록 "guild:ID"·"channel:ID"),
 ///   `target_user_id`(따라갈 사용자 ID), 비밀값 `bot_token`(<see cref="SecretStore"/>, DPAPI)
 /// - 모드(2026-11-13): enabled=false → 꺼짐, enabled=true·auto_only=false → 켜짐(어디든 따라감), enabled=true·auto_only=true → 자동.
@@ -17,7 +18,7 @@ namespace LifeLog.Collector.Windows.Sources.Recording;
 /// 호스트가 설치 행을 읽은 뒤 <see cref="Apply"/>로 넣고, 데스크톱 설정 화면·CLI가 DB를 바꾸면 수집기 다시 읽기(reload)로 새 호스트가 다시 넣는다.
 /// 옛 %LOCALAPPDATA%\SecondBrain\collector\discord.json은 처음 실행 때 <see cref="TakeLegacy"/>로 옮기고 discord.json.migrated로 이름을 바꾼다.
 /// </summary>
-public sealed record DiscordSettings(string OutputDevice, bool BotEnabled, string TargetUser, bool BotAuto = false, IReadOnlyList<string>? AutoTargets = null)
+public sealed record DiscordSettings(string OutputDevice, bool BotEnabled, string TargetUser, bool BotAuto = false, IReadOnlyList<string>? AutoTargets = null, string OutputDeviceName = "")
 {
     public const string ModeOff = "off", ModeOn = "on", ModeAuto = "auto";
     public const string OutputPlugin = "win-discord-output";
@@ -63,9 +64,26 @@ public sealed record DiscordSettings(string OutputDevice, bool BotEnabled, strin
     /// <summary>호스트: 두 플러그인의 설치 설정을 넣는다(없으면 기본값).</summary>
     public static void Apply(JsonElement? output, JsonElement? bot)
     {
-        _current = new(Str(output, "output_device"), Bool(bot, "enabled"), Str(bot, "target_user_id"), Bool(bot, "auto_only"), List(bot, "auto_targets"));
+        _current = new(Str(output, "output_device"), Bool(bot, "enabled"), Str(bot, "target_user_id"), Bool(bot, "auto_only"), List(bot, "auto_targets"), Str(output, "output_device_name"));
         Interlocked.Increment(ref _version);
         Changed?.Invoke(_current);
+    }
+
+    /// <summary>
+    /// 출력 녹음: 실제로 연 장치의 ID·이름을 기억한다. 둘 다 같으면 아무것도 안 한다.
+    /// 판(version)은 올리지 않는다(같은 장치를 다시 붙지 않게). DB에도 쓴다.
+    /// </summary>
+    public static void RememberOutputDevice(string id, string name)
+    {
+        var cur = _current;
+        if (cur.OutputDevice == id && cur.OutputDeviceName == name) return;
+        _current = cur with { OutputDevice = id, OutputDeviceName = name };
+        if (Persist is { } p)
+            _ = Task.Run(async () =>
+            {
+                if (cur.OutputDevice != id) await p(OutputPlugin, "output_device", JsonValue.Create(id));
+                if (cur.OutputDeviceName != name) await p(OutputPlugin, "output_device_name", JsonValue.Create(name));
+            });
     }
 
     /// <summary>트레이: 봇 녹음 모드(off·on·auto). 바로 반영하고 DB에도 쓴다(enabled → auto_only 순서로).</summary>
