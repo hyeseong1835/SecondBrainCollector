@@ -119,3 +119,10 @@ powershell -ExecutionPolicy Bypass -File scripts\verify.ps1 -Restore   # 빌드 
   그 속성이 없으면 컨트롤러 경로(`,2`, 예: `{1}.INTELAUDIO\FUNC_01&…`)를 그대로 둔다.
 - 시험: `audio-device-test [초] [--ndjson]`(지금 장치·기본 장치 + 그 초 동안 소스 이벤트, DB 없이), `node --test tools/plugin-tests/win-audio-device.test.mjs`.
   실제 이벤트를 플러그인에 먹여 행 모양 보기: `audio-device-test 10 --ndjson | node tools/plugin-tests/win-audio-device.test.mjs --live`.
+
+## 블루투스 (2026-11-16)
+- 소스 `bluetooth`(`BluetoothSource`), 플러그인 `win-bluetooth`: 이 노트북에 **페어링한** 기기(클래식 `BluetoothDevice`·LE `BluetoothLEDevice`)의 링크 연결·끊김(`ConnectionStatusChanged`, 30초마다 목록 다시 읽기)과 어댑터 켜짐·꺼짐(`Radio.StateChanged`)을 `connection`·`adapter` 구간으로 남긴다. 안드로이드 `phone-bluetooth`와 같은 열(`audio` 출력만 없음. 오디오는 win-audio-device).
+- 같은 주소의 클래식·LE는 한 기기(`device_type` dual, `transports` "bredr,le"). 클래스는 클래식 CoD에서 안드로이드와 같은 값(`major_class`, `device_class` = CoD & 0x1FFC). LE 전용은 클래스 없음 → `kind` other.
+- 배터리: PnP 속성 `{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2`(컨테이너의 노드). 기기가 알려 줄 때만(이 PC에서는 ULT WEAR·S26·MX Master가 나옴). 프로필(`profiles`)은 윈도우가 주지 않아 늘 null.
+- 랜덤 주소 LE 기기(address_type random: Logitech·Xbox 패드·폰의 LE 링크 등)는 기본으로 기록하지 않는다. 설정 `include_random_le`를 켜면 이름만 기록(주소는 늘 null). 개인정보 `store_address`를 끄면 MAC도 null.
+- 시험: `bluetooth-test [초]`(지금 기기·링크 상태 + 초를 주면 이벤트), `node --test tools/plugin-tests/win-bluetooth.test.mjs`.
