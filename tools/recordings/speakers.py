@@ -136,13 +136,14 @@ def label_segments(segs: list, turns: list, names: dict) -> None:
 
 def group_words(words: list, gap_ms=1200, max_ms=30000) -> list:
     """단어 구간(whisper -ml 1 -sow)을 이어 붙여 문장 구간으로. 화자가 바뀌거나, 틈이 gap_ms 이상이거나, max_ms를 넘으면 끊는다.
-    화자 없는 단어(겹치는 화자 없음)는 앞 구간에 붙인다."""
+    화자 없는 단어(겹치는 화자 없음)는 앞 구간에 붙인다. 단어 하나라도 suspect(전사 의심)면 묶은 구간도 suspect."""
     out = []
     for w in words:
         cur = out[-1] if out else None
         same = cur and (w["speaker"] is None or w["speaker"] == cur["speaker"])
         if same and w["startMs"] - cur["endMs"] < gap_ms and w["endMs"] - cur["startMs"] <= max_ms:
             cur["endMs"] = max(cur["endMs"], w["endMs"]); cur["text"] += " " + w["text"]
+            if w.get("suspect"): cur["suspect"] = True
         else:
             out.append(dict(w))
     return out

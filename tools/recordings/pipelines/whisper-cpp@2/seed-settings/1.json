@@ -1,0 +1,14 @@
+{
+  "asrModel": "batisay-ko-turbo-q8_0",
+  "maxContext": 0,
+  "chunkSec": 30,
+  "chunkMinSec": 20,
+  "vadMinSilenceMs": 500,
+  "vadPadMs": 200,
+  "maxPhraseRepeat": 3,
+  "maxCharRun": 12,
+  "maxCompressionRatio": 2.4,
+  "maxCharsPerSec": 15,
+  "retryTemperature": 0.4,
+  "onSuspect": "mark"
+}

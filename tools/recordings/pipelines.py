@@ -109,11 +109,12 @@ def read(p: Pipeline, n: int, root: Path | None = None) -> dict:
     return effective(p, json.loads((settings_dir(p, root) / f"{n}.json").read_text(encoding="utf-8-sig")))
 
 
-def write(p: Pipeline, values: dict, root: Path | None = None) -> int:
-    """새 설정 버전(지금 가장 큰 번호 + 1)으로 쓴다. 있는 파일은 덮지 않는다(x 모드). → 번호"""
+def write(p: Pipeline, values: dict, root: Path | None = None, floor: int = 0) -> int:
+    """새 설정 버전(이 PC의 가장 큰 번호와 floor 중 큰 것 + 1)으로 쓴다. floor = 서버 목록의 그 파이프라인 설정 버전 최대(다른 PC가 쓴 번호와 겹치지 않게).
+    있는 파일은 덮지 않는다(x 모드). → 번호"""
     d = settings_dir(p, root)
     d.mkdir(parents=True, exist_ok=True)
-    n = max(versions(p, root), default=0) + 1
+    n = max(versions(p, root) + [floor]) + 1
     while True:
         try:
             with open(d / f"{n}.json", "x", encoding="utf-8") as f:
@@ -134,9 +135,20 @@ def find(p: Pipeline, values: dict, root: Path | None = None) -> int | None:
     return None
 
 
-def find_or_write(p: Pipeline, values: dict, root: Path | None = None) -> int:
+def find_or_write(p: Pipeline, values: dict, root: Path | None = None, floor: int = 0) -> int:
     n = find(p, values, root)
-    return n if n is not None else write(p, values, root)
+    return n if n is not None else write(p, values, root, floor)
+
+
+def server_versions(rows, p: Pipeline) -> list:
+    """서버 목록(GET /api/transcription/pipelines 응답) 중 이 파이프라인의 설정 버전들"""
+    out = []
+    for r in rows or []:
+        try:
+            if str(r.get("name")) == p.name and str(r.get("version")) == p.version: out.append(int(r["settingsVersion"]))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            pass
+    return sorted(out)
 
 
 def listing(pipes: dict, root: Path | None = None) -> list:

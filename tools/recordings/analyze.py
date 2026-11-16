@@ -38,6 +38,7 @@ API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrai
   python analyze.py --list-pipelines   # 이 PC의 파이프라인과 설정 버전(JSON)
   python analyze.py --pipeline whisper-cpp@1 --settings-version 2 --source phone --pick X.m4a --dry-run   # 설정 버전을 안 주면 최신
   --pipeline을 안 주면 whisper-cpp@1에서 전사 모델(--asr-model → settings.json의 asrModel → batisay-ko-turbo-q8_0)이 같은 설정 버전(없으면 새로 씀).
+  새로 쓰는 설정 버전 번호 = (이 PC, 서버 목록 GET /api/transcription/pipelines의 그 파이프라인) 중 최대 + 1. 서버 목록을 못 읽으면(옛 서버) 경고하고 이 PC 기준.
   미전사 = 어느 파이프라인의 결과도 없는 묶음(GET /api/recordings/analyzed). 다른 파이프라인으로 다시 돌리려면 --redo·--pick.
 전사 모델(--asr-model, 2026-11-13): models/ggml-*.bin 중 하나. 2026-11-16부터 whisper-cpp@1의 설정 asrModel로 바꿔 쓴다(데스크톱 호환, --pipeline whisper-cpp@1과만 같이 쓸 수 있음)
   python analyze.py --list-models   # 쓸 수 있는 모델과 기본값(JSON)
@@ -158,10 +159,13 @@ def model_error(names: list) -> ValueError:
     return ValueError(f"전사 모델 없음: {', '.join(map(str, names))} (설치된 모델: {have}, 폴더: {M.models_dir()})")
 
 
-def choose_pipeline(pipeline: str | None, settings_version: int | None, asr_model: str | None, pipes: dict, root: Path | None = None, create: bool = True) -> Chosen:
+def choose_pipeline(pipeline: str | None, settings_version: int | None, asr_model: str | None, pipes: dict, root: Path | None = None, create: bool = True,
+                    server=None) -> Chosen:
     """--pipeline·--settings-version·--asr-model → 항목. 고를 수 없으면 ValueError.
     --pipeline이 없으면 whisper-cpp@1에서 전사 모델(--asr-model → settings.json → 기본)이 같은 설정 버전(없으면 새로 씀, 데스크톱 호환).
-    --pipeline만 주면 최신 설정 버전(하나도 없으면 기본값으로 1을 씀). create=False(--plan)면 새 설정 버전을 쓰지 않고 ValueError."""
+    --pipeline만 주면 최신 설정 버전(하나도 없으면 기본값으로 1을 씀). create=False(--plan)면 새 설정 버전을 쓰지 않고 ValueError.
+    새 설정 버전 번호 = (이 PC, server(p) = 서버 목록의 그 파이프라인 설정 버전들) 중 최대 + 1. server는 새로 쓸 때만 부른다."""
+    floor = lambda: max(server(p) if server else [], default=0)
     key = pipeline or LEGACY_PIPELINE
     P.parse_key(key)
     p = pipes.get(key)
@@ -176,7 +180,7 @@ def choose_pipeline(pipeline: str | None, settings_version: int | None, asr_mode
         n = P.find(p, {"asrModel": name}, root)
         if n is None:
             if not create: raise ValueError(f"{key}에 asrModel={name}인 설정 버전이 아직 없음(전사할 때 새로 씀)")
-            n = P.write(p, {"asrModel": name}, root)
+            n = P.write(p, {"asrModel": name}, root, floor())
     else:
         have = P.versions(p, root)
         if settings_version:
@@ -185,10 +189,19 @@ def choose_pipeline(pipeline: str | None, settings_version: int | None, asr_mode
             n = settings_version
         else:
             if not have and not create: raise ValueError(f"{key}에 설정 버전이 아직 없음(전사할 때 기본값으로 1을 씀)")
-            n = have[-1] if have else P.write(p, P.defaults(p), root)
+            n = have[-1] if have else P.write(p, P.defaults(p), root, floor())
     c = Chosen(p, n, P.read(p, n, root))
     if missing := missing_models(p, c.settings): raise model_error(missing)
     return c
+
+
+def server_settings_versions(p: P.Pipeline, warn) -> list:
+    """서버 목록(GET /api/transcription/pipelines, 읽기만)의 그 파이프라인 설정 버전들. 못 읽으면(옛 서버·연결 안 됨) 경고하고 []"""
+    try:
+        return P.server_versions(api()("GET", "/api/transcription/pipelines"), p)
+    except Exception as e:
+        warn(f"서버 전사 파이프라인 목록을 읽지 못해 이 PC 기준으로 새 설정 번호를 정합니다({p.key}): {str(e)[-200:]}")
+        return []
 
 
 def transcribe(wav: Path, tmp: Path, words: bool = False):
@@ -473,7 +486,8 @@ def main():
     global CHOSEN
     if not a.sweep_silent:
         try:
-            CHOSEN = choose_pipeline(a.pipeline, a.settings_version, a.asr_model, P.discover(warn=warn), create=not a.plan)
+            CHOSEN = choose_pipeline(a.pipeline, a.settings_version, a.asr_model, P.discover(warn=warn), create=not a.plan,
+                                     server=lambda p: server_settings_versions(p, warn))
         except ValueError as e:
             if not a.plan:
                 progress("error", message=str(e)); print(e); sys.exit(2)
