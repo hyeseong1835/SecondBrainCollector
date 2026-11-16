@@ -7,13 +7,15 @@ import asrmodels as M
 
 HERE = Path(__file__).parent
 # 실행 약속만 보는 가짜 파이프라인: 설정의 text를 구간 하나로, --words면 단어마다. --hints면 첫 구간을 prompt로 바꾸고 ids를 vocabUsed로
-FAKE = '''import argparse, json
+FAKE = '''import argparse, json, sys
 ap = argparse.ArgumentParser()
 for k in ("--wav", "--out", "--settings"): ap.add_argument(k, required=True)
 ap.add_argument("--words", action="store_true")
 ap.add_argument("--hints")
 a = ap.parse_args()
 s = json.load(open(a.settings, encoding="utf-8"))
+for line in s.get("stdout") or []: print(line, flush=True)
+if s.get("stderr"): sys.stderr.write(s["stderr"]); sys.stderr.flush()
 if s.get("fail"): raise SystemExit("일부러 실패")
 words = s["text"].split() if a.words else [s["text"]]
 segs = [{"startMs": i * 100, "endMs": i * 100 + 90, "text": w} for i, w in enumerate(words)] + [{"startMs": 0, "endMs": 1, "text": "  "}]
@@ -121,6 +123,67 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "일부러 실패"):
             P.run(p, P.effective(p, {"fail": True}), wav, work)
 
+    def run_fake(self, **settings):
+        """가짜 파이프라인을 돌려 (구간들, 받은 진행들)"""
+        p = P.load(make(self.repo)) if not (self.repo / "fake@1").exists() else P.load(self.repo / "fake@1")
+        wav = self.root / "p0.wav"; wav.write_bytes(b"")
+        work = self.root / "work"; work.mkdir(exist_ok=True)
+        got = []
+        segs = P.run(p, P.effective(p, settings), wav, work, on_progress=got.append)
+        return segs, got
+
+    def test_run_progress_lines(self):
+        base, none = self.run_fake()
+        self.assertEqual(none, [])   # 진행을 안 내는 파이프라인도 그대로
+        lines = ['@@progress {"percent": 12.5, "text": "조각 1/3"}', "그냥 로그 한 줄", '@@progress {"text": " 글만 "}', '@@progress {"percent": 250}',
+                 '@@progress {깨진 JSON', '@@progress [1, 2]', '@@progress {"percent": "abc", "text": "x"}', '@@progress {"percent": true}', '@@progress {}',
+                 '@@progress {"percent": -5}', '@@progress {"percent": 100, "text": "끝"}']
+        segs, got = self.run_fake(stdout=lines)
+        self.assertEqual(segs, base)   # 같은 입력에 같은 출력
+        self.assertEqual(got, [{"percent": 12.5, "text": "조각 1/3"}, {"text": "글만"}, {"percent": 100.0}, {"text": "x"}, {"percent": 0.0}, {"percent": 100.0, "text": "끝"}])
+
+    def test_run_progress_without_listener_and_big_stderr(self):
+        p = P.load(make(self.repo))
+        wav = self.root / "p0.wav"; wav.write_bytes(b"")
+        work = self.root / "work"; work.mkdir()
+        s = P.effective(p, {"stdout": ['@@progress {"percent": 1}'], "stderr": "로그\n" * 100000})   # 표준 오류가 가득 차도 멈추지 않는다
+        self.assertEqual(P.run(p, s, wav, work)[0]["text"], "안녕 하세요")
+        with self.assertRaises(RuntimeError) as e:
+            P.run(p, {**s, "fail": True, "stderr": "원인 설명\n"}, wav, work, on_progress=lambda ev: None)
+        self.assertIn("원인 설명", str(e.exception)); self.assertIn("종료 코드 1", str(e.exception))
+
+    def test_parse_progress(self):
+        self.assertEqual(P.parse_progress('@@progress {"percent": 3, "text": "a"}\n'),{"percent": 3.0, "text": "a"})
+        self.assertIsNone(P.parse_progress('{"percent": 3}'))   # 접두어 없음
+        self.assertIsNone(P.parse_progress('@@progress {"percent": NaN}'))
+        self.assertIsNone(P.parse_progress("@@progress"))
+        self.assertEqual(P.parse_progress('@@progress {"percent": 5, "text": 7}'), {"percent": 5.0})   # 문자열이 아닌 text는 버리고 percent만
+
+    def test_throttle(self):
+        t = [0.0]
+        g = P.Throttle(0.25, clock=lambda: t[0])
+        got = []
+        for now in (0.0, 0.1, 0.24, 0.25, 0.3, 0.6, 0.9):
+            t[0] = now; got.append(g.ok())
+        self.assertEqual(got, [True, False, False, True, False, True, True])   # 초당 4번
+
+    def test_analyze_reporter(self):
+        import analyze, contextlib, io
+        old = analyze.PROGRESS
+        try:
+            analyze.PROGRESS = False
+            self.assertIsNone(analyze.transcribe_reporter(1, 2))
+            analyze.PROGRESS = True
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rep = analyze.transcribe_reporter(2, 3)
+                rep({"percent": 40.0, "text": "조각 2/5"}); rep({"percent": 41.0}); analyze.transcribe_reporter(3, 3)({"text": "글"})
+        finally:
+            analyze.PROGRESS = old
+        self.assertEqual([json.loads(l[len("@@progress "):]) for l in out.getvalue().splitlines()],
+                         [{"event": "step", "stage": "transcribe", "file": 2, "files": 3, "percent": 40.0, "text": "조각 2/5"},   # 41.0은 너무 잦아 거름
+                          {"event": "step", "stage": "transcribe", "file": 3, "files": 3, "text": "글"}])   # percent 없으면 생략
+
     def test_run_hints_only_for_hints_pipelines(self):
         wav = self.root / "p0.wav"; wav.write_bytes(b"")
         work = self.root / "work"; work.mkdir()
@@ -157,6 +220,61 @@ class PipelineTests(unittest.TestCase):
             {"offsets": {"from": 1600, "to": 1700}, "text": "한글자막 by 누구"},
             {"offsets": {"from": 1700, "to": 2500}, "text": "네."}]}
         self.assertEqual(wc1.segments(data), [{"startMs": 0, "endMs": 900, "text": "안녕하세요"}, {"startMs": 1700, "endMs": 2500, "text": "네."}])
+
+    def load_wc1(self):
+        spec = importlib.util.spec_from_file_location("wc1", HERE / "pipelines" / "whisper-cpp@1" / "transcribe.py")
+        wc1 = importlib.util.module_from_spec(spec); spec.loader.exec_module(wc1)
+        return wc1
+
+    def test_whisper_cpp_1_run_whisper(self):
+        wc1 = self.load_wc1()
+        child = "\n".join(["import sys", "e = lambda t: print(t, file=sys.stderr, flush=True)",
+                           "e('whisper_print_progress_callback: progress =   5%')", "e('아무 로그')",
+                           "e('whisper_print_progress_callback: progress = 100%')", "e('원인')", "sys.exit(3)"])
+        got = []
+        code, tail = wc1.run_whisper([sys.executable, "-c", child], got.append)
+        self.assertEqual((code, got), (3, [5.0, 100.0]))
+        self.assertEqual(tail, "아무 로그\n원인\n")   # 진행 줄은 오류 꼬리에서 뺌
+        self.assertEqual(wc1.run_whisper([sys.executable, "-c", "pass"])[0], 0)   # 듣는 쪽이 없어도 됨
+
+    def test_whisper_cpp_1_same_output_with_progress(self):
+        import contextlib, io, os
+        wc1 = self.load_wc1()
+        tools = self.root / "tools"
+        for p in ("src/whisper.cpp/build/bin/whisper-cli.exe", "models/ggml-batisay-ko-turbo-q8_0.bin", "models/ggml-silero-v5.1.2.bin"):
+            (tools / p).parent.mkdir(parents=True, exist_ok=True); (tools / p).write_bytes(b"")
+        (self.root / "s.json").write_text("{}", encoding="utf-8")
+        data = {"transcription": [{"offsets": {"from": 0, "to": 900}, "text": " 안녕하세요 "}, {"offsets": {"from": 900, "to": 1500}, "text": "시청해 주셔서 감사합니다"},
+                                  {"offsets": {"from": 1700, "to": 2500}, "text": "네."}]}
+        cmds = []
+
+        def fake(cmd, on_percent=None):
+            cmds.append(cmd)
+            Path(cmd[cmd.index("-of") + 1] + ".json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            for pct in (5, 50, 100):
+                on_percent(float(pct))
+            return 0, ""
+
+        old, env, argv = wc1.run_whisper, dict(os.environ), sys.argv
+        wc1.run_whisper = fake
+        os.environ["SECONDBRAIN_ANALYSIS_TOOLS"] = str(tools)
+        try:
+            for words in (False, True):
+                out = self.root / f"o{int(words)}.json"
+                sys.argv = ["t", "--wav", "in.wav", "--out", str(out), "--settings", str(self.root / "s.json")] + (["--words"] if words else [])
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    wc1.main()
+                self.assertEqual(json.loads(out.read_text(encoding="utf-8")),   # 결과는 진행도 없던 때와 같다
+                                 {"segments": [{"startMs": 0, "endMs": 900, "text": "안녕하세요"}, {"startMs": 1700, "endMs": 2500, "text": "네."}]})
+                self.assertEqual([P.parse_progress(l) for l in buf.getvalue().splitlines()], [{"percent": 0.0}, {"percent": 5.0}, {"percent": 50.0}, {"percent": 100.0}])
+        finally:
+            wc1.run_whisper, sys.argv = old, argv
+            os.environ.clear(); os.environ.update(env)
+        # 명령줄은 -pp만 더해졌다(나머지 인자·순서는 2026-11-16 그대로)
+        exe, model, vad = (str(tools / x) for x in ("src/whisper.cpp/build/bin/whisper-cli.exe", "models/ggml-batisay-ko-turbo-q8_0.bin", "models/ggml-silero-v5.1.2.bin"))
+        want = lambda stem: [exe, "-m", model, "-l", "ko", "-f", "in.wav", "-oj", "-of", str(self.root / stem), "-np", "-pp", "--vad", "-vm", vad, "-vsd", "500", "-vp", "200"]
+        self.assertEqual(cmds, [want("o0.whisper"), want("o1.whisper") + ["-ml", "1", "-sow"]])
 
 
 class ChooseTests(unittest.TestCase):

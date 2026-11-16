@@ -120,7 +120,7 @@ class TranscribeTests(unittest.TestCase):
         T.whisper = self.orig
         self.tmp.cleanup()
 
-    def fake(self, base, names, work):
+    def fake(self, base, names, work, progress=None):
         self.calls.append((base, names))
         retry = "-tp" in base
         for n in names:
@@ -144,6 +144,66 @@ class TranscribeTests(unittest.TestCase):
         self.assertIn("-mc", first[0]); self.assertEqual(first[0][first[0].index("-mc") + 1], "0")
         self.assertEqual(retry[1], ["c0001.wav", "c0002.wav"]); self.assertEqual(retry[0][-2:], ["-tp", "0.4"])
 
+    def test_progress_same_result(self):
+        """진행도를 받아도 결과·통계가 같고, 조각 수 기준 percent·"조각 i/m"·다시 돌리는 중이 나온다"""
+        bad = " ".join(["데스라인 벤션 2차 강화입니다."] * 10)
+        self.texts = {("c0000.wav", False): "안녕하세요", ("c0001.wav", False): bad, ("c0001.wav", True): "버스 안내 방송", ("c0002.wav", False): "으" * 200}
+        plain = self.run_it()
+        plain_calls = list(self.calls)
+
+        def fake(base, names, work, progress=None):
+            for i in range(len(names) if progress else 0):   # 조각마다 0%, 100% 줄
+                progress(i, len(names), 0.0); progress(i, len(names), 100.0)
+            self.fake(base, names, work)
+        T.whisper = fake
+        self.calls.clear()
+        events = []
+        segs, stats, used = T.transcribe(self.wav, self.work, SETTINGS, False, self.tools, None, lambda percent, text: events.append((round(percent, 1), text)))
+        self.assertEqual((segs, stats), plain)
+        self.assertEqual(self.calls, plain_calls)   # 전사기에 넘기는 인자도 그대로
+        self.assertEqual(events, [(0, "조각 1/3"), (0.0, "조각 1/3"), (33.3, "조각 1/3"), (33.3, "조각 2/3"), (66.7, "조각 2/3"), (66.7, "조각 3/3"), (100.0, "조각 3/3"),
+                                  (100, "다시 돌리는 중 1/2조각"), (100, "다시 돌리는 중 1/2조각"), (100, "다시 돌리는 중 2/2조각"), (100, "다시 돌리는 중 2/2조각")])
+
+    def test_whisper_counts_finished_chunks_and_adds_pp(self):
+        cmds, got = [], []
+
+        def fake(cmd, work, on_percent=None):
+            cmds.append((cmd, work))
+            stems = [cmd[i + 1] for i, x in enumerate(cmd) if x == "-of"]
+            for k, stem in enumerate(stems):
+                for pct in (10.0, 100.0):
+                    on_percent(pct)
+                (work / f"{stem}.json").write_text("{}", encoding="utf-8")
+            return 0, ""
+        old, names = T.run_whisper, [f"c{k:04d}.wav" for k in range(45)]
+        T.run_whisper = fake
+        try:
+            self.orig(["whisper"], names, self.work, lambda done, total, pct: got.append((done, total, pct)))
+        finally:
+            T.run_whisper = old
+        self.assertEqual([len(c[0][1:]) for c in cmds], [1 + 4 * 40, 1 + 4 * 5])   # -pp 하나 + 조각마다 -f -이름 -of -이름
+        self.assertIn("-pp", cmds[0][0]); self.assertEqual(cmds[0][1], self.work)
+        self.assertEqual(got[0], (0, 45, 10.0))
+        self.assertEqual(got[1:3], [(0, 45, 100.0), (1, 45, 10.0)])   # .json이 생긴 조각만 끝난 것
+        self.assertEqual(got[-1], (44, 45, 100.0))
+        self.assertEqual(self.orig(["whisper"], [], self.work), None)
+
+    def test_run_whisper_reads_progress(self):
+        child = "\n".join(["import sys", "e = lambda t: print(t, file=sys.stderr, flush=True)",
+                           "e('whisper_print_progress_callback: progress =  10%')", "e('whisper_print_progress_callback: progress = 100%')", "e('원인')", "sys.exit(2)"])
+        got = []
+        self.assertEqual(T.run_whisper([sys.executable, "-c", child], self.work, got.append), (2, "원인\n"))
+        self.assertEqual(got, [10.0, 100.0])
+        self.assertEqual(T.run_whisper([sys.executable, "-c", "pass"], self.work)[0], 0)
+
+    def test_emit(self):
+        import contextlib, io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            T.emit(33.333, "조각 2/3"); T.emit(150, "끝"); T.emit(text="글만"); T.emit()
+        self.assertEqual([P.parse_progress(l) for l in buf.getvalue().splitlines()],
+                         [{"percent": 33.3, "text": "조각 2/3"}, {"percent": 100.0, "text": "끝"}, {"text": "글만"}, None])   # 빈 줄 하나는 약속에서 무시
+
     def test_drop_and_no_retry(self):
         self.texts = {("c0000.wav", False): "네", ("c0001.wav", False): "u/ " * 40, ("c0002.wav", False): "끝"}
         segs, stats = self.run_it(retryTemperature=0, onSuspect="drop")
@@ -157,7 +217,7 @@ class TranscribeTests(unittest.TestCase):
         self.assertEqual(stats["droppedChunks"], 1)
 
     def test_broken_utf8_from_whisper(self):
-        def broken(base, names, work):
+        def broken(base, names, work, progress=None):
             for n in names:   # "안녕" 뒤에 "하"(ED 95 98)의 앞 두 바이트만
                 raw = '{"transcription": [{"offsets": {"from": 0, "to": 500}, "text": "안녕'.encode() + b"\xed\x95" + b'"}]}'
                 (work / (Path(n).stem + ".json")).write_bytes(raw)
