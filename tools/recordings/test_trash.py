@@ -43,6 +43,16 @@ class TrashTests(unittest.TestCase):
         self.assertEqual(c[8:], ["2", "s1", "e1", "1"])   # 폰 원본도(2026-11-12 사용자 결정)
         self.assertEqual(T.listed(self.root), {("phone", "20261111-090000-aaaa.m4a"), ("phone", "20261111-090040-bbbb.m4a")})
 
+    def test_favorites_and_protected(self):
+        rows = [{"device": "laptop", "file": "laptop-mic/2026-11-16/m.m4a", "source": "laptop-mic"}, {"device": "phone", "file": "2026-11-16/a.m4a", "source": "phone"}]
+        favs = T.favorites(rows)
+        self.assertEqual(favs, {("laptop-mic", "m.m4a"), ("phone", "a.m4a")})
+        self.assertTrue(T.protected({("phone", "a.m4a"), ("phone", "b.m4a")}, set(), favs))   # 묶음 파일 하나라도 즐겨찾기면 뺌
+        self.assertFalse(T.protected({("phone", "b.m4a")}, set(), favs))
+        self.assertTrue(T.protected({("phone", "b.m4a")}, {("phone", "b.m4a")}, favs))   # 되살린 것
+        self.assertTrue(T.protected({("phone", "b.m4a")}, set(), None))   # 즐겨찾기를 못 읽으면 옮기지 않음
+        self.assertEqual(T.favorites(None), set())
+
     def test_kept(self):
         self.assertEqual(T.kept(self.root), set())
         (self.root / "_trash").mkdir()
