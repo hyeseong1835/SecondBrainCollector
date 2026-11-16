@@ -1,0 +1,174 @@
+"""전사 파이프라인(2026-11-16). 계획: SecondBrainCollector/Documents/음성 전사 개선 계획.md "파이프라인 틀 인터페이스 약속".
+
+- 파이프라인 = 폴더 하나 <name>@<version>/ (pipeline.json + 스크립트). analyze.py를 고치지 않고 폴더를 넣고 빼서 추가·제거한다.
+  찾는 곳(앞이 우선, 같은 이름@버전이면 사용자 폴더): %USERPROFILE%/.secondbrain/analysis/pipelines → 저장소 tools/recordings/pipelines
+- pipeline.json: {name, version, description, autoRecommend, entry, settings: {키: {type, default, label}}}
+  type: string | number | bool | whisper-model(models/ggml-<이름>.bin, analyze.py --list-models 목록. analyze.py가 실행 전에 있는지 본다)
+- 실행: python <entry> --wav W --out O.json --settings S.json [--words] → O.json = {"segments": [{startMs, endMs, text, suspect?}]}
+  S.json은 설정 버전 파일에 기본값을 채운 것. 환경 변수 SECONDBRAIN_ANALYSIS_TOOLS = 도구·모델 폴더(whisper.cpp·models, sbpaths.TOOLS).
+- 설정 버전: %USERPROFILE%/.secondbrain/analysis/pipeline-settings/<name>@<version>/<N>.json (N은 1부터). 한 번 쓴 파일은 고치지 않고, 바꾸면 새 번호로 쓴다.
+  파이프라인 폴더의 seed-settings/<N>.json은 사용자 폴더에 그 번호가 없을 때만 베낀다(서버 기존 결과 이전과 번호를 맞추려고).
+"""
+import json, os, re, shutil, subprocess, sys
+from dataclasses import dataclass
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+import sbpaths
+
+REPO = Path(__file__).parent / "pipelines"
+USER = sbpaths.ANALYSIS / "pipelines"
+SETTINGS = sbpaths.ANALYSIS / "pipeline-settings"
+KEY = re.compile(r"^([^@\\/]+)@([^@\\/]+)$")
+
+
+@dataclass
+class Pipeline:
+    name: str
+    version: str
+    description: str
+    auto_recommend: bool
+    entry: Path
+    schema: dict
+    folder: Path
+
+    @property
+    def key(self) -> str:
+        return f"{self.name}@{self.version}"
+
+
+def parse_key(key: str):
+    """'whisper-cpp@1' → ('whisper-cpp', '1'). 꼴이 아니면 ValueError"""
+    m = KEY.match(key.strip())
+    if not m: raise ValueError(f"파이프라인은 <이름>@<버전> 꼴이어야 합니다: {key}")
+    return m.group(1), m.group(2)
+
+
+def load(folder: Path) -> Pipeline:
+    """폴더 하나의 pipeline.json. 폴더 이름과 매니페스트의 이름@버전이 다르거나 entry가 없으면 ValueError"""
+    m = json.loads((folder / "pipeline.json").read_text(encoding="utf-8-sig"))
+    name, version = str(m.get("name") or ""), str(m.get("version") or "")
+    if f"{name}@{version}" != folder.name:
+        raise ValueError(f"폴더 이름({folder.name})과 pipeline.json의 이름@버전({name}@{version})이 다릅니다")
+    entry = folder / str(m.get("entry") or "")
+    if not m.get("entry") or not entry.is_file():
+        raise ValueError(f"entry 파일이 없습니다: {entry}")
+    schema = m.get("settings") or {}
+    if not isinstance(schema, dict) or not all(isinstance(v, dict) for v in schema.values()):
+        raise ValueError("settings는 {키: {type, default, label}} 꼴이어야 합니다")
+    return Pipeline(name, version, str(m.get("description") or ""), bool(m.get("autoRecommend")), entry, schema, folder)
+
+
+def discover(roots: list | None = None, warn=None) -> dict:
+    """{이름@버전: Pipeline}. roots 앞쪽이 우선. 깨진 폴더는 warn(메시지)로 알리고 건너뛴다."""
+    out = {}
+    for root in roots if roots is not None else [USER, REPO]:
+        if not root.is_dir(): continue
+        for d in sorted(root.iterdir()):
+            if not d.is_dir() or not KEY.match(d.name) or not (d / "pipeline.json").exists() or d.name in out: continue
+            try:
+                out[d.name] = load(d)
+            except (OSError, ValueError) as e:
+                if warn: warn(f"파이프라인 건너뜀 {d}: {e}")
+    return out
+
+
+def settings_dir(p: Pipeline, root: Path | None = None) -> Path:
+    return (root or SETTINGS) / p.key
+
+
+def seed(p: Pipeline, root: Path | None = None) -> list:
+    """seed-settings/<N>.json 중 사용자 폴더에 없는 번호만 베낀다(있는 것은 그대로). → 베낀 번호들"""
+    src = p.folder / "seed-settings"
+    if not src.is_dir(): return []
+    dst, done = settings_dir(p, root), []
+    for f in sorted(src.glob("*.json")):
+        if not re.fullmatch(r"[1-9]\d*", f.stem) or (dst / f.name).exists(): continue
+        dst.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(f, dst / f.name)
+        done.append(int(f.stem))
+    return done
+
+
+def versions(p: Pipeline, root: Path | None = None) -> list:
+    d = settings_dir(p, root)
+    if not d.is_dir(): return []
+    return sorted(int(f.stem) for f in d.glob("*.json") if re.fullmatch(r"[1-9]\d*", f.stem))
+
+
+def defaults(p: Pipeline) -> dict:
+    return {k: v.get("default") for k, v in p.schema.items()}
+
+
+def effective(p: Pipeline, values: dict) -> dict:
+    """기본값 위에 값을 얹는다. 매니페스트에 없는 키도 그대로 둔다."""
+    return {**defaults(p), **(values or {})}
+
+
+def read(p: Pipeline, n: int, root: Path | None = None) -> dict:
+    """설정 버전 n(기본값 채움). 파일이 없으면 FileNotFoundError"""
+    return effective(p, json.loads((settings_dir(p, root) / f"{n}.json").read_text(encoding="utf-8-sig")))
+
+
+def write(p: Pipeline, values: dict, root: Path | None = None) -> int:
+    """새 설정 버전(지금 가장 큰 번호 + 1)으로 쓴다. 있는 파일은 덮지 않는다(x 모드). → 번호"""
+    d = settings_dir(p, root)
+    d.mkdir(parents=True, exist_ok=True)
+    n = max(versions(p, root), default=0) + 1
+    while True:
+        try:
+            with open(d / f"{n}.json", "x", encoding="utf-8") as f:
+                json.dump(effective(p, values), f, ensure_ascii=False, indent=2)
+            return n
+        except FileExistsError:   # 데스크톱이 같은 때 썼으면 다음 번호
+            n += 1
+
+
+def find(p: Pipeline, values: dict, root: Path | None = None) -> int | None:
+    """기본값을 채워 같은 설정인 가장 이른 버전. 없으면 None. 깨진 파일은 건너뛴다."""
+    want = effective(p, values)
+    for n in versions(p, root):
+        try:
+            if read(p, n, root) == want: return n
+        except (OSError, ValueError):
+            pass
+    return None
+
+
+def find_or_write(p: Pipeline, values: dict, root: Path | None = None) -> int:
+    n = find(p, values, root)
+    return n if n is not None else write(p, values, root)
+
+
+def listing(pipes: dict, root: Path | None = None) -> list:
+    """analyze.py --list-pipelines 한 줄씩(약속의 모양 그대로)."""
+    out = []
+    for p in pipes.values():
+        seed(p, root)
+        vs = versions(p, root)
+        out.append({"name": p.name, "version": p.version, "description": p.description, "autoRecommend": p.auto_recommend,
+                    "settingsSchema": p.schema, "settingsVersions": vs, "latestSettingsVersion": vs[-1] if vs else None, "folder": str(p.folder)})
+    return out
+
+
+def run(p: Pipeline, settings: dict, wav: Path, tmp: Path, words: bool = False, tools: Path | None = None) -> list:
+    """파이프라인 하나로 wav → 구간들 [{startMs, endMs, text, suspect?}]. 실패하면 RuntimeError(stderr 끝)"""
+    s_path, o_path = tmp / f"{wav.stem}.settings.json", tmp / f"{wav.stem}.segments.json"
+    s_path.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
+    o_path.unlink(missing_ok=True)
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "SECONDBRAIN_ANALYSIS_TOOLS": str(tools or sbpaths.TOOLS)}
+    cmd = [sys.executable, str(p.entry), "--wav", str(wav), "--out", str(o_path), "--settings", str(s_path)] + (["--words"] if words else [])
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, cwd=str(p.folder))
+    if r.returncode != 0:
+        raise RuntimeError(f"{p.key} 실패(종료 코드 {r.returncode}): " + (r.stderr or r.stdout)[-400:].strip())
+    try:
+        segs = json.loads(o_path.read_text(encoding="utf-8-sig"))["segments"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise RuntimeError(f"{p.key} 결과를 읽지 못함({o_path.name}): {e}")
+    out = []
+    for s in segs:
+        text = str(s.get("text") or "").strip()
+        if not text: continue
+        seg = {"startMs": int(s["startMs"]), "endMs": int(s["endMs"]), "speaker": None, "text": text}
+        if s.get("suspect"): seg["suspect"] = True
+        out.append(seg)
+    return out

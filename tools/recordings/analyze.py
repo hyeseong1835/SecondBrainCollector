@@ -32,25 +32,30 @@
 도구·모델: %LOCALAPPDATA%/SecondBrain/analysis (whisper.cpp Vulkan 빌드, ffmpeg, llama.cpp Vulkan, 모델들)
   전사 모델은 고를 수 있다(asrmodels.py, 기본 batisay-ko-turbo q8_0) + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
 API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrain/api.json, sbpaths.py)의 url·key(훅 키). 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 있으면 그것(시험 인스턴스)
-전사 모델(--asr-model, 2026-11-13): models/ggml-*.bin 중 하나. 주지 않으면 settings.json의 asrModel(데스크톱 설정에서 고름) → batisay-ko-turbo-q8_0
+전사 파이프라인(2026-11-16, pipelines.py): 전사(wav → 구간)는 파이프라인 폴더(<이름>@<버전>/)의 스크립트가 하고, 여기는 wav 만들기·묶음·화자 구분·요약·업로드만.
+  결과마다 pipeline {name, version, settingsVersion}을 붙이고, 올리기 전에 서버 목록에 등록한다(POST /api/transcription/pipelines).
+  python analyze.py --list-pipelines   # 이 PC의 파이프라인과 설정 버전(JSON)
+  python analyze.py --pipeline whisper-cpp@1 --settings-version 2 --source phone --pick X.m4a --dry-run   # 설정 버전을 안 주면 최신
+  --pipeline을 안 주면 whisper-cpp@1에서 전사 모델(--asr-model → settings.json의 asrModel → batisay-ko-turbo-q8_0)이 같은 설정 버전(없으면 새로 씀).
+  미전사 = 어느 파이프라인의 결과도 없는 묶음(GET /api/recordings/analyzed). 다른 파이프라인으로 다시 돌리려면 --redo·--pick.
+전사 모델(--asr-model, 2026-11-13): models/ggml-*.bin 중 하나. 2026-11-16부터 whisper-cpp@1의 설정 asrModel로 바꿔 쓴다(데스크톱 호환, --pipeline whisper-cpp@1과만 같이 쓸 수 있음)
   python analyze.py --list-models   # 쓸 수 있는 모델과 기본값(JSON)
   python analyze.py --source phone --pick X.m4a --asr-model large-v3-turbo --dry-run
 단계(--stage, 2026-11-11): transcribe(기본) = 전사·화자 구분만 올린다(요약 비움). all = 예전처럼 전사하고 바로 요약
 """
 import argparse, datetime as dt, json, os, re, subprocess, sys, tempfile, time, urllib.parse, urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import bundles as B
 import runlock
 import trash as T
 import asrmodels as M
+import pipelines as P
 import sbpaths
 
 LOCAL = Path(os.environ["LOCALAPPDATA"])
 A = sbpaths.TOOLS   # 도구·모델(옮기지 않음)
-WHISPER = A / "src" / "whisper.cpp" / "build" / "bin" / "whisper-cli.exe"
-ASR_MODEL = A / "models" / f"ggml-{M.DEFAULT}.bin"   # run()이 --asr-model·설정값으로 바꾼다
-VAD_MODEL = A / "models" / "ggml-silero-v5.1.2.bin"
 LLM_MODEL = A / "models" / "EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf"
 LLAMA = A / "llama" / "llama-server.exe"
 FFMPEG = next((A / "ffmpeg").rglob("ffmpeg.exe"), None)
@@ -58,7 +63,8 @@ ROOT = Path(os.environ["USERPROFILE"]) / "SecondBrainRecordings"
 SOURCES = {"phone": "phone", "discord-output": "laptop", "discord-bot": "laptop", "call": "phone", "laptop-mic": "laptop"}   # 폴더 → 기기
 REL_PREFIX = {"call": "call/", "laptop-mic": "laptop-mic/"}   # 같은 기기의 다른 출처와 file 이름이 겹치지 않게
 LLM_PORT = 8089
-# whisper가 말소리 없는 곳에서 지어내는 흔한 문장(유튜브 자막 학습 흔적)
+LEGACY_PIPELINE = "whisper-cpp@1"   # --pipeline을 안 주면(--asr-model·settings.json asrModel을 이 파이프라인의 설정으로)
+# whisper가 말소리 없는 곳에서 지어내는 흔한 문장(유튜브 자막 학습 흔적). 전사는 파이프라인이 거르고, 여기선 화자 구분으로 다시 묶은 구간에 쓴다
 HALLUCINATIONS = re.compile(r"^(시청해\s*주셔서\s*감사합니다|구독과\s*좋아요|MBC\s*뉴스|자막\s*제공|한글\s*자막.*|[.\s,!?♪\-–—]*)$")   # large-v3-turbo는 화자가 바뀔 때 "-"만 든 단어, 무음에 "한글자막 by …"를 낸다(2026-11-13)
 
 
@@ -124,21 +130,69 @@ def to_wav(src: Path, dst: Path):
     return (dst.stat().st_size - 44) // 2 * 1000 // 16000   # 길이(ms)
 
 
-def transcribe(wav: Path, out_base: Path, words: bool = False):
-    """words=True면 단어마다 한 구간(-ml 1 -sow). 화자 구분(assign_speakers)이 화자별로 다시 묶는다"""
-    cmd = [str(WHISPER), "-m", str(ASR_MODEL), "-l", "ko", "-f", str(wav), "-oj", "-of", str(out_base), "-np",
-           "--vad", "-vm", str(VAD_MODEL), "-vsd", "500", "-vp", "200"] + (["-ml", "1", "-sow"] if words else [])
-    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if p.returncode != 0:
-        raise RuntimeError("whisper 실패: " + p.stderr[-400:])
-    data = json.load(open(str(out_base) + ".json", encoding="utf-8"))
-    segs = []
-    for s in data.get("transcription", []):
-        text = (s.get("text") or "").strip()
-        if not text or HALLUCINATIONS.match(text):
-            continue
-        segs.append({"startMs": int(s["offsets"]["from"]), "endMs": int(s["offsets"]["to"]), "speaker": None, "text": text})
-    return segs
+@dataclass
+class Chosen:
+    """이번 실행의 전사 파이프라인 항목과 그 설정(기본값 채움)"""
+    pipe: P.Pipeline
+    settings_version: int
+    settings: dict
+
+    def ref(self) -> dict:
+        return {"name": self.pipe.name, "version": self.pipe.version, "settingsVersion": self.settings_version}
+
+    def label(self) -> str:
+        return f"{self.pipe.key} 설정 {self.settings_version} (" + ", ".join(f"{k}={v}" for k, v in self.settings.items()) + ")"
+
+
+CHOSEN: "Chosen | None" = None   # main()이 정한다
+
+
+def missing_models(p: P.Pipeline, settings: dict) -> list:
+    """설정 중 type whisper-model인데 models/에 없는 모델 이름들"""
+    return [settings.get(k) for k, v in p.schema.items() if v.get("type") == "whisper-model" and M.resolve(str(settings.get(k) or ""))[1] is None]
+
+
+def model_error(names: list) -> ValueError:
+    have = ", ".join(n for n, _, _ in M.available()) or "없음"
+    return ValueError(f"전사 모델 없음: {', '.join(map(str, names))} (설치된 모델: {have}, 폴더: {M.models_dir()})")
+
+
+def choose_pipeline(pipeline: str | None, settings_version: int | None, asr_model: str | None, pipes: dict, root: Path | None = None, create: bool = True) -> Chosen:
+    """--pipeline·--settings-version·--asr-model → 항목. 고를 수 없으면 ValueError.
+    --pipeline이 없으면 whisper-cpp@1에서 전사 모델(--asr-model → settings.json → 기본)이 같은 설정 버전(없으면 새로 씀, 데스크톱 호환).
+    --pipeline만 주면 최신 설정 버전(하나도 없으면 기본값으로 1을 씀). create=False(--plan)면 새 설정 버전을 쓰지 않고 ValueError."""
+    key = pipeline or LEGACY_PIPELINE
+    P.parse_key(key)
+    p = pipes.get(key)
+    if p is None:
+        raise ValueError(f"파이프라인 없음: {key} (있는 것: {', '.join(pipes) or '없음'})")
+    P.seed(p, root)
+    if asr_model or (pipeline is None and settings_version is None):
+        if key != LEGACY_PIPELINE: raise ValueError(f"--asr-model은 {LEGACY_PIPELINE}에만 쓸 수 있습니다")
+        if settings_version: raise ValueError("--asr-model과 --settings-version은 함께 쓸 수 없습니다")
+        name, path = M.resolve(asr_model)
+        if path is None: raise model_error([name])
+        n = P.find(p, {"asrModel": name}, root)
+        if n is None:
+            if not create: raise ValueError(f"{key}에 asrModel={name}인 설정 버전이 아직 없음(전사할 때 새로 씀)")
+            n = P.write(p, {"asrModel": name}, root)
+    else:
+        have = P.versions(p, root)
+        if settings_version:
+            if settings_version not in have:
+                raise ValueError(f"{key}에 설정 버전 {settings_version}이 없습니다(있는 것: {', '.join(map(str, have)) or '없음'}, {P.settings_dir(p, root)})")
+            n = settings_version
+        else:
+            if not have and not create: raise ValueError(f"{key}에 설정 버전이 아직 없음(전사할 때 기본값으로 1을 씀)")
+            n = have[-1] if have else P.write(p, P.defaults(p), root)
+    c = Chosen(p, n, P.read(p, n, root))
+    if missing := missing_models(p, c.settings): raise model_error(missing)
+    return c
+
+
+def transcribe(wav: Path, tmp: Path, words: bool = False):
+    """이번 실행의 파이프라인으로 wav → 구간. words=True면 단어마다 한 구간(화자 구분 assign_speakers가 화자별로 다시 묶는다)"""
+    return P.run(CHOSEN.pipe, CHOSEN.settings, wav, tmp, words=words, tools=A)
 
 
 class Llm:
@@ -322,7 +376,7 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
         wav = tmp / f"p{k}.wav"
         to_wav(it.path, wav)
         wavs.append(wav)
-        part = transcribe(wav, tmp / "a", words=words_mode)
+        part = transcribe(wav, tmp, words=words_mode)
         off = it.start - b.start
         for s in part:
             s["startMs"] += off; s["endMs"] += off
@@ -354,7 +408,7 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
         summary = f"통화 상대: {partner}\n{summary}"
     files = [{"file": it.rel, "startedAt": iso(it.start), "endedAt": iso(it.end), "offsetMs": it.start - b.start} for it in b.items]
     return {"device": SOURCES[source], "file": first.rel, "source": source, "startedAt": iso(b.start), "endedAt": iso(b.end),
-            "asrModel": ASR_MODEL.stem.removeprefix("ggml-"), "llmModel": LLM_MODEL.stem if summary else None, "language": "ko",
+            "pipeline": CHOSEN.ref(), "llmModel": LLM_MODEL.stem if summary else None, "language": "ko",
             "speechMs": speech, "transcript": transcript, "summary": summary, "segments": segs, "files": files}
 
 
@@ -388,7 +442,10 @@ def main():
     ap.add_argument("--source", choices=list(SOURCES), help="이 원천 폴더만(예: phone)")
     ap.add_argument("--pick", help="--source 안에서 이 파일 이름이 든 묶음 하나만(이미 분석했어도 다시)")
     ap.add_argument("--call", help="이 파일 이름이 든 디스코드 통화(callSources 묶음들)의 미전사 묶음 전부(--redo면 전부)")
-    ap.add_argument("--asr-model", help="전사 모델 이름(models/ggml-<이름>.bin). 없으면 settings.json의 asrModel → " + M.DEFAULT)
+    ap.add_argument("--pipeline", help=f"전사 파이프라인 <이름>@<버전>(--list-pipelines). 없으면 {LEGACY_PIPELINE}(전사 모델 = --asr-model → settings.json)")
+    ap.add_argument("--settings-version", type=int, help="파이프라인 설정 버전(없으면 최신)")
+    ap.add_argument("--list-pipelines", action="store_true", help="이 PC의 전사 파이프라인과 설정 버전을 JSON으로 보이고 끝낸다")
+    ap.add_argument("--asr-model", help=f"전사 모델 이름(models/ggml-<이름>.bin) → {LEGACY_PIPELINE}에서 asrModel이 그것인 설정 버전. 없으면 settings.json의 asrModel → " + M.DEFAULT)
     ap.add_argument("--list-models", action="store_true", help="쓸 수 있는 전사 모델과 기본값을 JSON으로 보이고 끝낸다")
     ap.add_argument("--progress-json", action="store_true", help='진행을 "@@progress {json}" 줄로도 낸다')
     ap.add_argument("--only-new", action="store_true", help="--pick·--file로 고른 묶음이 이미 전사돼 있으면 건너뛴다(대기열에서 미전사로 넣은 것)")
@@ -406,14 +463,18 @@ def main():
         print(json.dumps({"default": name if path else None, "configured": M.configured(), "settings": str(M.settings_path()),
                           "models": [{"name": n, "bytes": size} for n, _, size in M.available()]}, ensure_ascii=False))
         return
-    global ASR_MODEL
-    asr_name, asr_path = M.resolve(a.asr_model)
-    if asr_path is None and not a.plan and not a.sweep_silent:
-        have = ", ".join(n for n, _, _ in M.available()) or "없음"
-        progress("error", message=f"전사 모델 없음: {asr_name} (설치된 모델: {have})")
-        print(f"전사 모델이 없습니다: {asr_name}\n  설치된 모델: {have}\n  폴더: {M.models_dir()}")
-        sys.exit(2)
-    if asr_path: ASR_MODEL = asr_path
+    warn = lambda m: print("  " + m, file=sys.stderr)
+    if a.list_pipelines:
+        print(json.dumps(P.listing(P.discover(warn=warn)), ensure_ascii=False))
+        return
+    global CHOSEN
+    if not a.sweep_silent:
+        try:
+            CHOSEN = choose_pipeline(a.pipeline, a.settings_version, a.asr_model, P.discover(warn=warn), create=not a.plan)
+        except ValueError as e:
+            if not a.plan:
+                progress("error", message=str(e)); print(e); sys.exit(2)
+            print("  (파이프라인을 고르지 못함:", str(e) + ")")
     if a.pick and not a.source: ap.error("--pick에는 --source가 필요합니다")
     if a.call and (a.pick or a.file or a.source): ap.error("--call은 --pick·--file·--source와 함께 쓸 수 없습니다")
     if not a.plan:
@@ -441,20 +502,29 @@ def load_favorites(call):
         return None
 
 
+def all_silent(call, device: str, file: str) -> bool:
+    """그 묶음의 서버 결과(파이프라인마다 하나)가 모두 말소리 없음인가. 못 읽으면 False(옮기지 않음)."""
+    try:
+        rows = call("GET", f"/api/recordings/detail?device={urllib.parse.quote(device)}&file={urllib.parse.quote(file)}")
+    except Exception as e:
+        print(f"  전사 결과를 읽지 못해 휴지통으로 옮기지 않습니다: {str(e)[-200:]}")
+        return False
+    rows = rows if isinstance(rows, list) else [rows] if rows else []
+    return all(T.is_silent(r.get("segments") or [], r.get("transcript")) for r in rows)
+
+
 def sweep_silent(a, call):
-    """이미 전사된 묶음 중 말소리 없는 것(서버 분석 글 0자)을 휴지통으로. 묶음 파일이 이 PC에 모두 있을 때만."""
+    """이미 전사된 묶음 중 말소리 없는 것(서버 분석 글 0자, 결과가 여럿이면 모두)을 휴지통으로. 묶음 파일이 이 PC에 모두 있을 때만."""
     rows = call("GET", "/api/recordings?from=2000-01-01&to=2100-01-01") or []
     now = epoch_ms(dt.datetime.now().astimezone())
     gone, keep, favs = T.listed(ROOT), T.kept(ROOT), load_favorites(call)
     if favs is None: return
     rule, local = bundle_rule(lambda path: call("GET", path)), {}
     n, n_files = 0, 0
-    for r in sorted(rows, key=lambda r: r["startedAt"]):
+    for r in T.silent_bundles(rows):   # 행 = 결과 하나(전사 파이프라인). 다른 결과에 말이 있으면 뺀다
         src = r.get("source")
         if src not in T.SOURCES or (a.source and src != a.source): continue
-        if not T.is_silent(r.get("segments") or [], r.get("transcript")): continue
-        files = r.get("files") or [{"file": r["file"]}]
-        if isinstance(files, str): files = json.loads(files)
+        files = T.bundle_files(r)
         pre = REL_PREFIX.get(src, "")
         paths = [ROOT / src / f["file"].removeprefix(pre) for f in files]
         names = [p.name for p in paths]
@@ -482,9 +552,7 @@ def sweep_silent(a, call):
 def run(a):
     if a.sweep_silent:
         return sweep_silent(a, api())
-    if not a.plan:
-        for p in (WHISPER, ASR_MODEL, VAD_MODEL, FFMPEG):
-            if not p or not Path(p).exists(): sys.exit(f"없음: {p}")
+    if not a.plan and not FFMPEG: sys.exit(f"없음: {A / 'ffmpeg'}/**/ffmpeg.exe")
     call = api()
     get = lambda path: call("GET", path)
     rule = bundle_rule(get)
@@ -559,14 +627,20 @@ def call_jobs(a, get, rule, now):
 
 
 def run_jobs(a, call, jobs, n_done, n_progress):
-    print(f"전사 모델: {ASR_MODEL.stem.removeprefix('ggml-')}")
+    if CHOSEN: print("전사 파이프라인:", CHOSEN.label())
     print(("전사만 합니다(요약 안 함). " if a.stage == "transcribe" else "") + f"분석할 묶음 {len(jobs)}개(파일 {sum(len(b.items) for b in jobs)}개) · 이미 분석 {n_done} · 진행 중이라 건너뜀 {n_progress}")
     if not a.plan:
         runlock.set_plan([bundle_key(b) for b in jobs])
-        progress("plan", total=len(jobs), files=sum(len(b.items) for b in jobs), done=n_done, inProgress=n_progress, dryRun=a.dry_run, stage=a.stage, asrModel=ASR_MODEL.stem.removeprefix("ggml-"))
+        progress("plan", total=len(jobs), files=sum(len(b.items) for b in jobs), done=n_done, inProgress=n_progress, dryRun=a.dry_run, stage=a.stage,
+                 pipeline=CHOSEN.ref(), asrModel=CHOSEN.settings.get("asrModel"))
     if a.plan or not jobs:
         if not a.plan: progress("end", analyzed=0, total=0)
         return
+    if not a.dry_run:
+        try:   # 결과는 서버 목록에 있는 항목으로만 올릴 수 있다(없으면 400). 이미 있으면 그대로
+            call("POST", "/api/transcription/pipelines", CHOSEN.ref())
+        except Exception as e:
+            sys.exit(f"전사 파이프라인을 서버 목록에 등록하지 못했습니다({CHOSEN.pipe.key} 설정 {CHOSEN.settings_version}): {str(e)[-200:]}")
 
     llm = Llm() if a.stage == "all" else None
     spk = {}
@@ -592,7 +666,8 @@ def run_jobs(a, call, jobs, n_done, n_progress):
             progress("done", i=i, total=len(jobs), speechMs=body["speechMs"], segments=len(segs), seconds=round(time.time() - t0, 1),
                      uploaded=not a.dry_run, **bundle_info(b))
             if (not a.no_auto_remove and b.source in T.SOURCES and T.is_silent(segs, body["transcript"])
-                    and not T.protected({(b.source, it.path.name) for it in b.items}, T.kept(ROOT), load_favorites(call))):   # 되살린 것·즐겨찾기(그때 읽음)는 그대로
+                    and not T.protected({(b.source, it.path.name) for it in b.items}, T.kept(ROOT), load_favorites(call))   # 되살린 것·즐겨찾기(그때 읽음)는 그대로
+                    and (a.dry_run or all_silent(call, body["device"], body["file"]))):   # 다른 파이프라인 결과에 말이 있으면 그대로
                 if a.dry_run:
                     print(f"    말소리 없음 → 휴지통 후보(dry-run이라 옮기지 않음)")
                 else:
