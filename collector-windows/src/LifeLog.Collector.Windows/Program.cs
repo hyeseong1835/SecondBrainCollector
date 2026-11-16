@@ -50,6 +50,7 @@ static class Cli
           mic-test [초] [--device 이름] [--levels]   시험용: 마이크 소스만 돌려(통화 중일 때만 연다) 생긴 파일 기록을 찍는다(행은 안 냄). --levels는 5초마다 입력 레벨
 
           폰 링크(플러그인 win-phone-link. 폰 수집기가 BLE로 붙어 RSSI·시계 차이를 보낸다):
+          bluetooth-test [초]       지금 페어링된 블루투스 기기와 링크 상태(win-bluetooth가 기록할 값)를 찍는다. 초를 주면 그만큼 이벤트도 찍는다
           network-test              지금 노트북이 붙은 네트워크(win-network가 기록할 값)를 찍는다
           phone-link-test [초]      시험용: 링크 소스만 돌려 이벤트를 찍는다(실행 중인 수집기에 win-phone-link가 켜져 있으면 끄고 할 것)
           phone-link-calibrate [초] [--at 거리m]   폰을 노트북에서 거리m(기본 1)에 두고 실행. 실행 중인 수집기가 받은 RSSI 중앙값으로
@@ -94,6 +95,7 @@ static class Cli
                 case "discord-call": return DiscordCli.CallStatus(args[1..]);
                 case "mic-test": return DiscordCli.MicTest(args[1..]);
                 case "network-test": Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(LifeLog.Collector.Windows.Sources.NetworkSource.Read(), new System.Text.Json.JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping })); return 0;
+                case "bluetooth-test": return await BluetoothCli.Test(args[1..]);
                 case "phone-link-test": return PhoneLinkCli.Test(args[1..]);
                 case "phone-link-calibrate": return await PhoneLinkCli.Calibrate(args[1..]);
                 default: Console.WriteLine(Usage); return 1;

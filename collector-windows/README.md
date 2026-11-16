@@ -109,3 +109,10 @@ powershell -ExecutionPolicy Bypass -File scripts\verify.ps1 -Restore   # 빌드 
   `net_key` = 와이파이 `wifi:<SSID>`, 유선 `lan:<게이트웨이 MAC>`(ARP 실패 시 `lan-ip:<IP>`). SSID는 WinRT `GetConnectedSsid`, 비면 프로필 이름(24H2 위치 권한 없을 때).
 - 설치 설정 `zones`(JSON 문자열, `x-ui: network-zones`): 네트워크별 거리 구간. 수집기는 읽지 않고 웹 설정 › 네트워크별 거리 구간이 쓰고, 웹·데스크톱 화면이 RSSI를 구간 이름으로 바꿔 보인다.
 - 시험: `network-test`(지금 값 한 줄), `node --test tools/plugin-tests/win-network.test.mjs`.
+
+## 블루투스 (2026-11-16)
+- 소스 `bluetooth`(`BluetoothSource`), 플러그인 `win-bluetooth`: 이 노트북에 **페어링한** 기기(클래식 `BluetoothDevice`·LE `BluetoothLEDevice`)의 링크 연결·끊김(`ConnectionStatusChanged`, 30초마다 목록 다시 읽기)과 어댑터 켜짐·꺼짐(`Radio.StateChanged`)을 `connection`·`adapter` 구간으로 남긴다. 안드로이드 `phone-bluetooth`와 같은 열(`audio` 출력만 없음. 오디오는 win-audio-device).
+- 같은 주소의 클래식·LE는 한 기기(`device_type` dual, `transports` "bredr,le"). 클래스는 클래식 CoD에서 안드로이드와 같은 값(`major_class`, `device_class` = CoD & 0x1FFC). LE 전용은 클래스 없음 → `kind` other.
+- 배터리: PnP 속성 `{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2`(컨테이너의 노드). 기기가 알려 줄 때만(이 PC에서는 ULT WEAR·S26·MX Master가 나옴). 프로필(`profiles`)은 윈도우가 주지 않아 늘 null.
+- 랜덤 주소 LE 기기(address_type random: Logitech·Xbox 패드·폰의 LE 링크 등)는 기본으로 기록하지 않는다. 설정 `include_random_le`를 켜면 이름만 기록(주소는 늘 null). 개인정보 `store_address`를 끄면 MAC도 null.
+- 시험: `bluetooth-test [초]`(지금 기기·링크 상태 + 초를 주면 이벤트), `node --test tools/plugin-tests/win-bluetooth.test.mjs`.
