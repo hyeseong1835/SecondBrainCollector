@@ -8,8 +8,9 @@ namespace LifeLog.Collector.Windows.Sources.Recording;
 /// - 바닥+10dB가 200ms 이어지면 시작(앞 1초를 붙임), 바닥+6dB 아래가 5초 이어지면 끝, 30분이면 나눈다.
 /// - 파일: <see cref="RecordingPaths"/> 아래 &lt;folder&gt;\yyyy-MM-dd\yyyyMMdd-HHmmss-xxxxxxxx.m4a(.part → 이름 바꿈, 지우지 않음).
 /// - 파일 하나가 끝날 때마다 { start, end, file, bytes, sha256, codec, duration_ms, mean_db, peak_db, floor_db }를 낸다.
+///   <c>extra</c>가 있으면 그 열을 더한다(laptop_mic: 녹음에 쓴 입력 장치 input_device_*).
 /// </summary>
-public sealed class Segmenter(string folder, string tag, Action<Dictionary<string, object?>> emit, Action<string> log, Func<DateTimeOffset>? clock = null)
+public sealed class Segmenter(string folder, string tag, Action<Dictionary<string, object?>> emit, Action<string> log, Func<DateTimeOffset>? clock = null, Func<Dictionary<string, object?>>? extra = null)
 {
     public const int Frame = M4aWriter.Rate / 20;       // 50ms
     const double StartDb = 10, KeepDb = 6;
@@ -55,7 +56,7 @@ public sealed class Segmenter(string folder, string tag, Action<Dictionary<strin
     {
         var s = _seg!;
         _seg = null;
-        try { emit(s.Finish(Now, _floor)); }
+        try { var row = s.Finish(Now, _floor); if (extra is not null) foreach (var (k, v) in extra()) row[k] = v; emit(row); }
         catch (Exception e) { log($"[{tag}] 파일 마무리 실패 {s.Rel}: {e.Message}"); }
     }
 

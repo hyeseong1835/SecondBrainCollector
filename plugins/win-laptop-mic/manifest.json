@@ -1,7 +1,7 @@
 {
   "type": "collector",
   "id": "win-laptop-mic",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "노트북 마이크 녹음 (Windows)",
   "min_host_version": 1,
   "platforms": [
@@ -20,7 +20,7 @@
     {
       "name": "recording",
       "kind": "span",
-      "schema_version": 1,
+      "schema_version": 2,
       "columns": {
         "file": "text",
         "bytes": "bigint",
@@ -29,7 +29,10 @@
         "duration_ms": "bigint",
         "mean_db": "double precision",
         "peak_db": "double precision",
-        "floor_db": "double precision"
+        "floor_db": "double precision",
+        "input_device_id": "text",
+        "input_device_name": "text",
+        "input_device_instance_id": "text"
       },
       "label": "file",
       "identity": [
