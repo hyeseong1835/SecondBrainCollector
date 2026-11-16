@@ -109,3 +109,13 @@ powershell -ExecutionPolicy Bypass -File scripts\verify.ps1 -Restore   # 빌드 
   `net_key` = 와이파이 `wifi:<SSID>`, 유선 `lan:<게이트웨이 MAC>`(ARP 실패 시 `lan-ip:<IP>`). SSID는 WinRT `GetConnectedSsid`, 비면 프로필 이름(24H2 위치 권한 없을 때).
 - 설치 설정 `zones`(JSON 문자열, `x-ui: network-zones`): 네트워크별 거리 구간. 수집기는 읽지 않고 웹 설정 › 네트워크별 거리 구간이 쓰고, 웹·데스크톱 화면이 RSSI를 구간 이름으로 바꿔 보인다.
 - 시험: `network-test`(지금 값 한 줄), `node --test tools/plugin-tests/win-network.test.mjs`.
+
+## 오디오 장치 (2026-11-16)
+- 소스 `audio_device`(`AudioDeviceSource`), 플러그인 `win-audio-device`: Windows 오디오 입력·출력 장치(MMDevice)를 센서가 준 값 그대로 구간으로 남긴다. 기기 id·종류 판단은 넣지 않는다(Documents/기기.md 0절).
+  장치·기본 장치 바뀜은 MMDevice 알림으로 바로, 사용 여부는 3초마다 오디오 세션 상태로 읽고, 알림을 놓쳐도 1분마다 다시 읽는다.
+- 출력(모두 구간): `device`(endpoint_id·name·flow render/capture·form_factor·state·instance_id. state = `active` 켜져 있는 동안, `unplugged` 잭이 뽑히거나 블루투스가 끊겨 목록에 남은 동안. 꺼짐·사라짐은 구간 없음),
+  `default`(flow·role console/communications·endpoint_id·name = 그 역할의 기본 장치였던 동안), `usage`(endpoint_id·flow·name = 시스템 소리가 아닌 오디오 세션이 흐르던 동안).
+- `instance_id`: 블루투스 장치는 MAC이 든 BTHENUM 경로 그대로(endpoint 속성 `{b3f8fa53-0004-438e-9003-51a46e139bfc},39`, 예: `{1}.BTHENUM\{0000110B-…}_VID&…\7&…&0&8892CC81706A_C00000000`). 파싱은 서버가 한다.
+  그 속성이 없으면 컨트롤러 경로(`,2`, 예: `{1}.INTELAUDIO\FUNC_01&…`)를 그대로 둔다.
+- 시험: `audio-device-test [초] [--ndjson]`(지금 장치·기본 장치 + 그 초 동안 소스 이벤트, DB 없이), `node --test tools/plugin-tests/win-audio-device.test.mjs`.
+  실제 이벤트를 플러그인에 먹여 행 모양 보기: `audio-device-test 10 --ndjson | node tools/plugin-tests/win-audio-device.test.mjs --live`.

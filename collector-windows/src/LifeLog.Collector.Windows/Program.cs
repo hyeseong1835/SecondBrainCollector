@@ -51,6 +51,7 @@ static class Cli
 
           폰 링크(플러그인 win-phone-link. 폰 수집기가 BLE로 붙어 RSSI·시계 차이를 보낸다):
           network-test              지금 노트북이 붙은 네트워크(win-network가 기록할 값)를 찍는다
+          audio-device-test [초]    지금 오디오 입출력 장치·기본 장치(win-audio-device가 기록할 값)를 찍고, 초(기본 0)만큼 소스 이벤트를 따라 찍는다(DB 없이)
           phone-link-test [초]      시험용: 링크 소스만 돌려 이벤트를 찍는다(실행 중인 수집기에 win-phone-link가 켜져 있으면 끄고 할 것)
           phone-link-calibrate [초] [--at 거리m]   폰을 노트북에서 거리m(기본 1)에 두고 실행. 실행 중인 수집기가 받은 RSSI 중앙값으로
                                    기준 RSSI(ref_rssi_1m)를 정한다
@@ -94,6 +95,7 @@ static class Cli
                 case "discord-call": return DiscordCli.CallStatus(args[1..]);
                 case "mic-test": return DiscordCli.MicTest(args[1..]);
                 case "network-test": Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(LifeLog.Collector.Windows.Sources.NetworkSource.Read(), new System.Text.Json.JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping })); return 0;
+                case "audio-device-test": return AudioDeviceCli.Test(args[1..]);
                 case "phone-link-test": return PhoneLinkCli.Test(args[1..]);
                 case "phone-link-calibrate": return await PhoneLinkCli.Calibrate(args[1..]);
                 default: Console.WriteLine(Usage); return 1;
