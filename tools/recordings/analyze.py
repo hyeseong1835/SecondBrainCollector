@@ -12,6 +12,8 @@
   python analyze.py --progress-json # 사람이 읽는 줄 사이에 "@@progress {json}" 줄(데스크톱 녹음 화면이 읽음)
     전사 중에는 파이프라인이 낸 진행(pipelines.py 머리말)을 이어 받아 {"event":"step","stage":"transcribe","file":k,"files":n,"percent":0~100,"text":"…"}(percent·text는 있을 때만, 초당 4번까지)
   python analyze.py --source phone --pick X.m4a --only-new   # 이미 전사된 묶음이면 건너뜀(데스크톱 전사 대기열이 씀)
+  예상 시간(2026-11-17, eta.py): plan·start·step·done·error 줄에 "eta": {remainingSec, fileRemainingSec, endsAt, filesDone, filesTotal, audioDoneSec, audioTotalSec, …}
+    (남은 시간 = 남은 파일마다 a × 오디오 초 + b, a·b는 이 PC 기록(파이프라인·설정 버전·실행 옵션별)과 이번 실행의 끝난 파일로 맞춤. 표본이 모자라면 null = 계산 중)
 
 동시 실행 막기(runlock.py): %USERPROFILE%/.secondbrain/analysis/analyze.lock + 명령줄에 analyze.py가 든 다른 python 프로세스. 이미 돌고 있으면 종료 코드 3.
 전사 대기열(2026-11-12): 데스크톱 녹음 화면이 %USERPROFILE%/.secondbrain/analysis/queue.json(2026-11-14 옮김)에 쌓아 두고 차례로 이 스크립트를 띄운다.
@@ -62,6 +64,7 @@ import runlock
 import trash as T
 import asrmodels as M
 import pipelines as P
+import eta as E
 import sbpaths
 
 LOCAL = Path(os.environ["LOCALAPPDATA"])
@@ -476,11 +479,14 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
     words_mode = source in SPEAKER_SOURCES
     wavs, segs, partner = [], [], None
     for k, it in enumerate(b.items):
+        if ETA: ETA.start_file(k)
         progress("step", stage="transcribe", file=k + 1, files=len(b.items))
         wav = tmp / f"p{k}.wav"
-        to_wav(it.path, wav)
+        ms = to_wav(it.path, wav)
+        if ETA: ETA.file_audio(ms / 1000)
         wavs.append(wav)
         part = transcribe(wav, tmp, words=words_mode, hints=hints, used=used, on_progress=transcribe_reporter(k + 1, len(b.items)))
+        if ETA: ETA.end_file()
         off = it.start - b.start
         for s in part:
             s["startMs"] += off; s["endMs"] += off
@@ -517,12 +523,21 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
 
 
 PROGRESS = False
+ETA: "E.Eta | None" = None   # 이번 실행의 예상 시간(run_jobs가 묶음을 정한 뒤 만든다)
+ETA_EVENTS = ("plan", "start", "step", "done", "error")
 
 
 def progress(event: str, **kw):
-    """--progress-json이면 기계가 읽는 진행 한 줄. 사람이 읽는 줄과 섞여 나오므로 접두어로 가른다."""
+    """--progress-json이면 기계가 읽는 진행 한 줄. 사람이 읽는 줄과 섞여 나오므로 접두어로 가른다. 실행 중이면 eta(eta.py)를 붙인다."""
     if PROGRESS:
+        if ETA and event in ETA_EVENTS:
+            kw["eta"] = ETA.snapshot(kw.get("percent"), transcribing=kw.get("stage", "transcribe") == "transcribe")
         print("@@progress " + json.dumps({"event": event, **kw}, ensure_ascii=False), flush=True)
+
+
+def plan_audio(jobs: list) -> list:
+    """묶음마다 파일 오디오 길이(초). 길이를 못 읽은 파일(scan이 1ms로 둔 것)은 0"""
+    return [[(it.end - it.start) / 1000 if it.end - it.start > 1 else 0 for it in b.items] for b in jobs]
 
 
 def bundle_info(b: "B.Bundle") -> dict:
@@ -760,10 +775,12 @@ def call_jobs(a, get, rule, now):
 
 
 def run_jobs(a, call, jobs, n_done, n_progress):
+    global ETA
     if CHOSEN: print("전사 파이프라인:", CHOSEN.label())
     print(("전사만 합니다(요약 안 함). " if a.stage == "transcribe" else "") + f"분석할 묶음 {len(jobs)}개(파일 {sum(len(b.items) for b in jobs)}개) · 이미 분석 {n_done} · 진행 중이라 건너뜀 {n_progress}")
     if not a.plan:
         runlock.set_plan([bundle_key(b) for b in jobs])
+        if jobs: ETA = E.Eta(plan_audio(jobs), E.key(CHOSEN.ref(), CHOSEN.run_options))
         progress("plan", total=len(jobs), files=sum(len(b.items) for b in jobs), done=n_done, inProgress=n_progress, dryRun=a.dry_run, stage=a.stage,
                  pipeline=CHOSEN.ref(), asrModel=CHOSEN.settings.get("asrModel"))
     if a.plan or not jobs:
@@ -781,6 +798,7 @@ def run_jobs(a, call, jobs, n_done, n_progress):
     try:
         for i, b in enumerate(jobs, 1):
             t0 = time.time()
+            ETA.start_bundle(i - 1)
             progress("start", i=i, total=len(jobs), **bundle_info(b))
             used = set()   # 이 묶음에서 실제로 쓴 단어장 항목 id
             try:
@@ -790,14 +808,18 @@ def run_jobs(a, call, jobs, n_done, n_progress):
                     call("PUT", "/api/recordings/analysis", body)
             except Exception as e:
                 failed.append(b)
+                ETA.end_bundle(ok=False)
                 msg = (str(e) or type(e).__name__).strip()
                 print(f"[{i}/{len(jobs)}] {b.source} {hms(b.start)}~{hms(b.end)[6:]}  실패, 건너뜀: {msg[-300:]}", flush=True)
                 progress("error", message=f"{b.source} {hms(b.start)} 묶음 실패(건너뜀): {msg[-200:]}", **bundle_info(b))
                 continue
+            ETA.end_bundle(ok=True)
             if not a.dry_run: mark_used(call, used)
             segs = body["segments"]
+            left = ETA.snapshot()
             print(f"[{i}/{len(jobs)}] {b.source} {hms(b.start)}~{hms(b.end)[6:]}  파일 {len(b.items)}개 {(b.end - b.start) / 1000:.0f}초"
-                  f" → 말 {body['speechMs'] / 1000:.0f}초, {len(segs)}구간 ({time.time() - t0:.1f}초)")
+                  f" → 말 {body['speechMs'] / 1000:.0f}초, {len(segs)}구간 ({time.time() - t0:.1f}초)"
+                  + (f" · 남은 예상 {E.human(left['remainingSec'])}({left['endsAt'][11:16]} 끝)" if left["remainingSec"] is not None and i < len(jobs) else ""))
             progress("done", i=i, total=len(jobs), speechMs=body["speechMs"], segments=len(segs), seconds=round(time.time() - t0, 1),
                      uploaded=not a.dry_run, **bundle_info(b))
             if (not a.no_auto_remove and b.source in T.SOURCES and T.is_silent(segs, body["transcript"])
