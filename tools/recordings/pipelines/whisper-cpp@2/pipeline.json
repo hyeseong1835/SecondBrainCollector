@@ -21,6 +21,7 @@
     "useHints": {"type": "bool", "default": true, "label": "단어장 힌트 쓰기(녹음마다 고른 이름·용어를 --prompt로, 고침 짝 치환)"},
     "hintMax": {"type": "number", "default": 20, "label": "힌트 최대 개수(단어장 고르기 max, 최대 50)"},
     "hintChars": {"type": "number", "default": 120, "label": "힌트 프롬프트 최대 글자 수(단어장 고르기 maxChars, 최대 400. whisper 프롬프트는 약 220토큰까지)"},
-    "hintContext": {"type": "number", "default": 224, "label": "힌트가 있을 때 -mc(whisper.cpp는 -mc 0이면 --prompt도 버림. 조각 안의 앞 글도 이만큼 이어짐)"}
+    "hintContext": {"type": "number", "default": 224, "label": "힌트가 있을 때 -mc(whisper.cpp는 -mc 0이면 --prompt도 버림. 조각 안의 앞 글도 이만큼 이어짐)"},
+    "parallel": {"type": "number", "default": 2, "label": "whisper-cli 동시 실행 수(GPU를 더 쓴다. 프로세스마다 VRAM 약 1.5GB)"}
   }
 }

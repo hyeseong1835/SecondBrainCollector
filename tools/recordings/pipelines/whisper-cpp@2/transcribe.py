@@ -19,8 +19,11 @@
 - 도구·모델 폴더: 환경 변수 SECONDBRAIN_ANALYSIS_TOOLS(analyze.py가 넘김) → %LOCALAPPDATA%/SecondBrain/analysis
 - 진행도(2026-11-17, 결과를 바꾸지 않아 같은 버전에 넣음): whisper-cli에 -pp를 더해 조각 안 "progress = N%" 줄과 끝난 조각 수(.json이 생긴 수)로
   표준 출력에 `@@progress {"percent": 조각 수 기준 0~100, "text": "조각 i/m"}`을 낸다. 품질 검사에 걸린 조각을 다시 돌리는 동안은 percent 100, text "다시 돌리는 중 i/b조각".
+- 동시 실행(2026-11-17 KST, 결과를 바꾸지 않아 같은 버전): 설정 parallel(기본 2)만큼 whisper-cli를 동시에 띄운다. 조각을 작업자마다 번갈아 나누고
+  (조각·인자가 같으니 조각마다 결과는 같다) 작업자마다 BATCH씩 넘긴다. 디코더(빔 5)·VAD·멜 변환을 CPU가 도는 동안 GPU가 쉬던 것을 메운다.
+  하나라도 실패하면 나머지를 죽이고 "whisper 실패". 진행도 = 끝난 조각 수(.json 수) + 돌고 있는 작업자들의 조각 안 퍼센트 평균. parallel 1이면 전과 같다.
 """
-import argparse, json, os, re, subprocess, sys, time, wave
+import argparse, json, os, re, subprocess, sys, threading, time, wave
 from collections import deque
 from pathlib import Path
 import numpy as np
@@ -90,24 +93,69 @@ def chunk_segments(data: dict, start_ms: int, end_ms: int) -> list:
     return out
 
 
-def whisper(base: list, names: list, work: Path, progress=None):
-    """조각 wav 이름들 → 같은 이름의 .json(work 안, 상대 경로로 명령줄을 줄인다).
-    progress(끝난 조각 수, 전체 조각 수, 지금 조각 안 진행 0~100) = -pp 진행 줄마다. 끝난 조각 = .json이 생긴 것(호출 전에 지워 둔다)"""
-    def on_percent(pct):
-        done = sum(1 for n in names if (work / f"{Path(n).stem}.json").exists())
-        progress(done, len(names), pct)
-    for i in range(0, len(names), BATCH):
-        cmd = list(base) + ["-pp"]
-        for n in names[i:i + BATCH]: cmd += ["-f", n, "-of", Path(n).stem]
-        code, tail = run_whisper(cmd, work, on_percent if progress else None)
-        if code != 0:
-            sys.exit("whisper 실패: " + tail[-400:])
+def split_names(names: list, n: int) -> list:
+    """조각 이름들 → 작업자 n개 몫(번갈아 나눔: 앞뒤 조각 길이가 달라도 고르게). 빈 몫은 뺀다"""
+    n = max(1, int(n or 1))
+    return [g for g in (names[i::n] for i in range(n)) if g]
 
 
-def run_whisper(cmd: list, work: Path, on_percent=None) -> tuple:
-    """whisper-cli를 돌려 (종료 코드, 출력 끝). 표준 오류를 섞어 줄 단위로 읽으며 -pp 진행 줄이면 on_percent(0~100)"""
+def whisper(base: list, names: list, work: Path, progress=None, parallel: int = 1):
+    """조각 wav 이름들 → 같은 이름의 .json(work 안, 상대 경로로 명령줄을 줄인다). whisper-cli를 parallel개까지 동시에(작업자마다 BATCH씩).
+    progress(끝난 조각 수, 전체 조각 수, 조각 안 진행 0~100) = -pp 진행 줄마다. 끝난 조각 = .json이 생긴 것(호출 전에 지워 둔다).
+    조각 안 진행 = 돌고 있는 작업자들의 마지막 퍼센트 평균. 여러 스레드가 불러도 progress는 한 번에 하나씩(잠금).
+    하나라도 실패하면 나머지 whisper-cli를 죽이고 sys.exit("whisper 실패: ...")"""
+    groups = split_names(names, parallel)
+    lock, stop = threading.Lock(), threading.Event()
+    pcts, procs, errors = [None] * len(groups), [], []
+
+    def report(w, pct):
+        with lock:
+            pcts[w] = pct
+            live = [p for p in pcts if p is not None]
+            done = sum(1 for n in names if (work / f"{Path(n).stem}.json").exists())
+            progress(done, len(names), sum(live) / len(live) if live else 0.0)
+
+    def started(p):
+        with lock:
+            procs.append(p)
+            if stop.is_set(): p.kill()   # 다른 작업자가 이미 실패했다
+
+    def fail(err):
+        with lock:
+            if not stop.is_set(): errors.append(err)   # 처음 실패만(죽인 작업자의 종료 코드는 원인이 아니다)
+            stop.set()
+            for p in procs:
+                if p.poll() is None: p.kill()
+
+    def run(w, group):
+        try:
+            for i in range(0, len(group), BATCH):
+                if stop.is_set(): return
+                cmd = list(base) + ["-pp"]
+                for n in group[i:i + BATCH]: cmd += ["-f", n, "-of", Path(n).stem]
+                code, tail = run_whisper(cmd, work, progress and (lambda pct: report(w, pct)), started)
+                if code != 0:
+                    fail("whisper 실패: " + tail[-400:]); return
+        except BaseException as e:
+            fail(e)
+        finally:
+            with lock: pcts[w] = None
+    if len(groups) <= 1:
+        for g in groups: run(0, g)
+    else:
+        threads = [threading.Thread(target=run, args=(w, g), daemon=True) for w, g in enumerate(groups)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+    if errors:
+        if isinstance(errors[0], BaseException): raise errors[0]
+        sys.exit(errors[0])
+
+
+def run_whisper(cmd: list, work: Path, on_percent=None, started=None) -> tuple:
+    """whisper-cli를 돌려 (종료 코드, 출력 끝). 표준 오류를 섞어 줄 단위로 읽으며 -pp 진행 줄이면 on_percent(0~100). started(Popen) = 띄운 직후(죽일 수 있게)"""
     tail = deque(maxlen=20)
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", cwd=str(work)) as p:
+        if started: started(p)
         for line in p.stdout:
             m = PROGRESS.search(line)
             if m:
@@ -148,7 +196,8 @@ def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, 
     load = lambda k: chunk_segments(json.loads((work / f"c{k:04d}.json").read_bytes().decode("utf-8", errors="replace")), *chunks[k])
     m = len(chunks)
     if progress: progress(0, f"조각 1/{m}")
-    whisper(base, names, work, progress and (lambda done, total, pct: progress((done + pct / 100) / total * 100, f"조각 {min(done + 1, total)}/{total}")))
+    par = max(1, int(settings.get("parallel") or 1))
+    whisper(base, names, work, progress and (lambda done, total, pct: progress((done + pct / 100) / total * 100, f"조각 {min(done + 1, total)}/{total}")), par)
     result = [load(k) for k in range(len(chunks))]
     checks = [Q.failures(Q.metrics(segs), settings) for segs in result]
     bad = [k for k, f in enumerate(checks) if f]
@@ -156,7 +205,7 @@ def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, 
     if bad and temp > 0:
         for k in bad: (work / f"c{k:04d}.json").unlink(missing_ok=True)
         whisper(base + ["-tp", str(temp)], [names[k] for k in bad], work,
-                progress and (lambda done, total, pct: progress(100, f"다시 돌리는 중 {min(done + 1, total)}/{total}조각")))
+                progress and (lambda done, total, pct: progress(100, f"다시 돌리는 중 {min(done + 1, total)}/{total}조각")), par)
         for k in bad:
             again = load(k)
             f2 = Q.failures(Q.metrics(again), settings)
@@ -178,7 +227,7 @@ def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, 
         used += fixed; n_fixed = sum(1 for s in out if "original" in s)
     return out, {"chunks": len(chunks), "retried": len(bad) if temp > 0 else 0, "suspectChunks": n_suspect, "droppedChunks": n_dropped,
                  "failures": {f"{a // 1000}s": f for (a, _), f in zip(chunks, checks) if f},
-                 "prompt": prompt, "fixedSegments": n_fixed}, used
+                 "prompt": prompt, "fixedSegments": n_fixed, "parallel": par}, used
 
 
 def main():
