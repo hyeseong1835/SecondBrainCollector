@@ -281,21 +281,40 @@ class TranscribeTests(unittest.TestCase):
         with self.assertRaises(OSError):
             self.orig(["whisper"], ["c0000.wav", "c0001.wav"], self.work, None, 2)
 
-    def test_parallel_setting_passed_and_same_result(self):
-        """parallel은 첫 전사·다시 돌리기 모두 whisper()로 넘어가고, 값이 달라도 구간은 같다(통계는 parallel만 다름)"""
+    def test_parallel_run_option_passed_and_same_result(self):
+        """실행 옵션 parallel은 첫 전사·다시 돌리기 모두 whisper()로 넘어가고, 값이 달라도 구간은 같다(통계는 parallel만 다름).
+        설정(S.json)에 parallel이 있어도 쓰지 않는다(설정이 아니다)"""
         bad = " ".join(["데스라인 벤션 2차 강화입니다."] * 10)
         self.texts = {("c0000.wav", False): "안녕하세요", ("c0001.wav", False): bad, ("c0001.wav", True): "버스 안내 방송", ("c0002.wav", False): "으" * 200}
-        self.assertEqual(SETTINGS["parallel"], 2)
-        one = self.run_it(parallel=1)
+        self.assertNotIn("parallel", SETTINGS)
+        run = lambda opts, **s: T.transcribe(self.wav, self.work, {**SETTINGS, **s}, False, self.tools, None, None, opts)[:2]
+        one = run({"parallel": 1})
         self.assertEqual(self.parallels, [1, 1])
         self.parallels.clear()
-        three = self.run_it(parallel=3)
+        three = run({"parallel": 3})
         self.assertEqual(self.parallels, [3, 3])
         self.assertEqual(one[0], three[0])
         self.assertEqual({**one[1], "parallel": 3}, three[1])
-        settings = dict(SETTINGS); del settings["parallel"]   # 설정 파일에 없으면(직접 실행) 1
-        T.transcribe(self.wav, self.work, settings, False, self.tools, None)
-        self.assertEqual(self.parallels[-1], 1)
+        self.parallels.clear()
+        run(None, parallel=4)   # --run-options가 없으면(직접 실행) 1
+        self.assertEqual(self.parallels, [1, 1])
+
+    def test_main_reads_run_options_file(self):
+        """transcribe.py --run-options R.json → transcribe(run=...)"""
+        got = []
+        old = T.transcribe
+        T.transcribe = lambda wav, work, settings, words, tools, hints, progress, run: got.append((settings, run)) or ([], {}, [])
+        self.addCleanup(setattr, T, "transcribe", old)
+        s, r, o = self.work / "s.json", self.work / "r.json", self.work / "o.json"
+        s.write_text(json.dumps(SETTINGS), encoding="utf-8"); r.write_text('{"parallel": 3}', encoding="utf-8")
+        argv = sys.argv
+        try:
+            sys.argv = ["transcribe.py", "--wav", str(self.wav), "--out", str(o), "--settings", str(s), "--run-options", str(r)]; T.main()
+            sys.argv = sys.argv[:-2]; T.main()
+        finally:
+            sys.argv = argv
+        self.assertEqual([x[1] for x in got], [{"parallel": 3}, {}])
+        self.assertEqual(got[0][0], SETTINGS)
 
     def test_whisper_parallel_real_processes(self):
         """진짜 하위 프로세스로: 작업자 2개가 동시에 돌고 .json이 다 생긴다"""
@@ -385,6 +404,12 @@ class TranscribeTests(unittest.TestCase):
         self.assertEqual(P.seed(p, root), [1])
         self.assertEqual(P.read(p, 1, root), SETTINGS)
         self.assertEqual(SETTINGS["maxContext"], 0)
+        # parallel은 실행 옵션: 설정 스키마·설정 버전에 없고, 기본값으로 찾으면 씨앗 1 그대로(새 설정 버전을 쓰지 않음)
+        self.assertNotIn("parallel", p.schema)
+        self.assertEqual(p.run_schema["parallel"]["default"], 2)
+        self.assertEqual(P.run_defaults(p), {"parallel": 2})
+        self.assertEqual(P.find_or_write(p, P.defaults(p), root), 1)
+        self.assertEqual(P.versions(p, root), [1])
 
 
 class VocabTests(unittest.TestCase):

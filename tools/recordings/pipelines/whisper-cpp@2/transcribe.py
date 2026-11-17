@@ -1,6 +1,6 @@
 """전사 파이프라인 whisper-cpp@2(2026-11-16): 반복 환각 막기(계획 "1단계"). 공개 뒤에는 고치지 않는다(바꾸면 whisper-cpp@3).
 
-  python transcribe.py --wav W --out O.json --settings S.json [--words] [--hints H.json]
+  python transcribe.py --wav W --out O.json --settings S.json [--words] [--hints H.json] [--run-options R.json]
   → O.json = {"segments": [{startMs, endMs, text, suspect?, original?}], "stats": {...}, "vocabUsed": [id]}
 
 @1과 다른 점(2026-11-14 통화가 버스 소음 구간부터 "으"·"u/"·"데스라인 벤션 2차 강화입니다." 수백 번으로 망가진 것):
@@ -19,7 +19,8 @@
 - 도구·모델 폴더: 환경 변수 SECONDBRAIN_ANALYSIS_TOOLS(analyze.py가 넘김) → %LOCALAPPDATA%/SecondBrain/analysis
 - 진행도(2026-11-17, 결과를 바꾸지 않아 같은 버전에 넣음): whisper-cli에 -pp를 더해 조각 안 "progress = N%" 줄과 끝난 조각 수(.json이 생긴 수)로
   표준 출력에 `@@progress {"percent": 조각 수 기준 0~100, "text": "조각 i/m"}`을 낸다. 품질 검사에 걸린 조각을 다시 돌리는 동안은 percent 100, text "다시 돌리는 중 i/b조각".
-- 동시 실행(2026-11-17 KST, 결과를 바꾸지 않아 같은 버전): 설정 parallel(기본 2)만큼 whisper-cli를 동시에 띄운다. 조각을 작업자마다 번갈아 나누고
+- 동시 실행(2026-11-17 KST, 결과를 바꾸지 않아 같은 버전): 실행 옵션 parallel(--run-options, 매니페스트 runOptions 기본 2. 설정 버전에 들어가지 않는다.
+  파일이 없으면 1)만큼 whisper-cli를 동시에 띄운다. 조각을 작업자마다 번갈아 나누고
   (조각·인자가 같으니 조각마다 결과는 같다) 작업자마다 BATCH씩 넘긴다. 디코더(빔 5)·VAD·멜 변환을 CPU가 도는 동안 GPU가 쉬던 것을 메운다.
   하나라도 실패하면 나머지를 죽이고 "whisper 실패". 진행도 = 끝난 조각 수(.json 수) + 돌고 있는 작업자들의 조각 안 퍼센트 평균. parallel 1이면 전과 같다.
 """
@@ -169,8 +170,9 @@ def badness(fails: list, m: dict) -> tuple:
     return (len(fails), m["phraseRepeat"], m["charRun"], m["compression"])
 
 
-def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, hints: dict | None = None, progress=None) -> tuple:
-    """→ (구간들, 통계, 쓴 단어장 id들). hints = vocab.load() 결과(없으면 힌트 없이). progress(percent, text) = 진행(emit)"""
+def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, hints: dict | None = None, progress=None, run: dict | None = None) -> tuple:
+    """→ (구간들, 통계, 쓴 단어장 id들). hints = vocab.load() 결과(없으면 힌트 없이). progress(percent, text) = 진행(emit).
+    run = 실행 옵션(결과를 바꾸지 않음): parallel(없으면 1)"""
     hints = hints if hints and settings.get("useHints", True) else None
     prompt = hints["prompt"] if hints else ""
     exe = tools / "src" / "whisper.cpp" / "build" / "bin" / "whisper-cli.exe"
@@ -196,7 +198,7 @@ def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, 
     load = lambda k: chunk_segments(json.loads((work / f"c{k:04d}.json").read_bytes().decode("utf-8", errors="replace")), *chunks[k])
     m = len(chunks)
     if progress: progress(0, f"조각 1/{m}")
-    par = max(1, int(settings.get("parallel") or 1))
+    par = max(1, int((run or {}).get("parallel") or 1))
     whisper(base, names, work, progress and (lambda done, total, pct: progress((done + pct / 100) / total * 100, f"조각 {min(done + 1, total)}/{total}")), par)
     result = [load(k) for k in range(len(chunks))]
     checks = [Q.failures(Q.metrics(segs), settings) for segs in result]
@@ -237,13 +239,15 @@ def main():
     ap.add_argument("--settings", required=True)
     ap.add_argument("--words", action="store_true")
     ap.add_argument("--hints", help="단어장 힌트 파일(vocab.py)")
+    ap.add_argument("--run-options", help="실행 옵션 파일(parallel, 결과를 바꾸지 않음)")
     a = ap.parse_args()
     settings = json.load(open(a.settings, encoding="utf-8"))
+    run = json.load(open(a.run_options, encoding="utf-8")) if a.run_options else {}
     out = Path(a.out)
     work = out.with_name(out.stem + ".chunks")
     work.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    segs, stats, used = transcribe(Path(a.wav).resolve(), work, settings, a.words, tools_dir(), V.load(a.hints) if a.hints else None, emit)
+    segs, stats, used = transcribe(Path(a.wav).resolve(), work, settings, a.words, tools_dir(), V.load(a.hints) if a.hints else None, emit, run)
     stats["seconds"] = round(time.time() - t0, 1)
     out.write_text(json.dumps({"segments": segs, "stats": stats, "vocabUsed": used}, ensure_ascii=False), encoding="utf-8")
     for f in work.iterdir(): f.unlink(missing_ok=True)

@@ -13,6 +13,11 @@
   파이프라인 폴더의 seed-settings/<N>.json은 사용자 폴더에 그 번호가 없을 때만 베낀다(서버 기존 결과 이전과 번호를 맞추려고).
 진행도(2026-11-17): 파이프라인은 표준 출력에 한 줄 `@@progress {"percent": 0~100, "text": "글"}`(둘 다 선택)을 낼 수 있다. run()이 줄 단위로 읽어 on_progress(percent·text 딕셔너리)로 넘긴다.
   percent = 그 파이프라인이 맡은 wav 하나 안의 진행. 다른 표준 출력 줄·깨진 줄은 무시, 로그는 표준 오류로. 진행도를 안 내도 그대로 돈다. 너무 잦은 것은 Throttle이 거른다.
+실행 옵션(2026-11-17): 결과를 바꾸지 않고 이 기기에서 어떻게 돌릴지만 정하는 값(예: whisper-cli 동시 실행 수 parallel). 설정과 따로 둔다.
+  매니페스트 runOptions: {키: {type, default, label}}(settings와 같은 꼴). 설정 버전 파일·find()·서버 기록(이름·버전·settingsVersion)에 들어가지 않는다.
+  이 기기의 값: 분석 설정 파일(asrmodels.settings_path(), %USERPROFILE%/.secondbrain/analysis/settings.json)의
+  "runOptions": {"<이름>@<버전>" 또는 "<이름>": {키: 값}}. 이름@버전이 이름보다 앞서고, 매니페스트에 없는 키·형식이 틀린 값은 버린다(기본값).
+  analyze.py --run-option 키=값이 그 위에 얹힌다(이번 실행만). 매니페스트에 runOptions가 있는 파이프라인에만 --run-options R.json(기본값 채움)을 더 넘긴다.
 """
 import json, os, re, shutil, subprocess, sys, threading, time
 from collections import deque
@@ -37,6 +42,7 @@ class Pipeline:
     schema: dict
     folder: Path
     hints: bool = False   # --hints(단어장 힌트 파일)를 받는가
+    run_schema: dict | None = None   # 실행 옵션 {키: {type, default, label}}(없으면 --run-options를 넘기지 않음)
 
     @property
     def key(self) -> str:
@@ -62,7 +68,12 @@ def load(folder: Path) -> Pipeline:
     schema = m.get("settings") or {}
     if not isinstance(schema, dict) or not all(isinstance(v, dict) for v in schema.values()):
         raise ValueError("settings는 {키: {type, default, label}} 꼴이어야 합니다")
-    return Pipeline(name, version, str(m.get("description") or ""), bool(m.get("autoRecommend")), entry, schema, folder, m.get("hints") is True)
+    run_schema = m.get("runOptions") or {}
+    if not isinstance(run_schema, dict) or not all(isinstance(v, dict) for v in run_schema.values()):
+        raise ValueError("runOptions는 {키: {type, default, label}} 꼴이어야 합니다")
+    if both := sorted(set(schema) & set(run_schema)):
+        raise ValueError(f"settings와 runOptions에 같은 키가 있습니다: {', '.join(both)}")
+    return Pipeline(name, version, str(m.get("description") or ""), bool(m.get("autoRecommend")), entry, schema, folder, m.get("hints") is True, run_schema)
 
 
 def discover(roots: list | None = None, warn=None) -> dict:
@@ -147,6 +158,47 @@ def find_or_write(p: Pipeline, values: dict, root: Path | None = None, floor: in
     return n if n is not None else write(p, values, root, floor)
 
 
+def run_defaults(p: Pipeline) -> dict:
+    return {k: v.get("default") for k, v in (p.run_schema or {}).items()}
+
+
+def fits(kind, value) -> bool:
+    if kind == "number": return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value
+    if kind == "bool": return isinstance(value, bool)
+    return isinstance(value, str)
+
+
+def run_values(p: Pipeline, local: dict | None = None, overrides: dict | None = None) -> dict:
+    """실행 옵션 = 매니페스트 기본값 ← 이 기기 값(local[이름] ← local[이름@버전]) ← overrides(--run-option).
+    매니페스트에 없는 키와 형식이 틀린 값은 버린다. 실행 옵션이 없는 파이프라인이면 {}"""
+    out = run_defaults(p)
+    layers = [(local or {}).get(p.name), (local or {}).get(p.key), overrides]
+    for layer in layers:
+        if not isinstance(layer, dict): continue
+        for k, v in layer.items():
+            if k in out and fits((p.run_schema[k] or {}).get("type", "string"), v): out[k] = v
+    return out
+
+
+def local_run_options(path: Path) -> dict:
+    """분석 설정 파일의 "runOptions"({이름@버전 또는 이름: {키: 값}}). 파일이 없거나 깨졌으면 {}"""
+    try:
+        v = json.loads(Path(path).read_text(encoding="utf-8-sig")).get("runOptions")
+        return v if isinstance(v, dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def parse_run_option(text: str) -> tuple:
+    """--run-option 키=값 → (키, 값). 값은 JSON으로 읽고(2, true, "x") 안 되면 글. '='가 없으면 ValueError"""
+    k, sep, v = text.partition("=")
+    if not sep or not k.strip(): raise ValueError(f"--run-option은 키=값 꼴이어야 합니다: {text}")
+    try:
+        return k.strip(), json.loads(v)
+    except ValueError:
+        return k.strip(), v
+
+
 def server_versions(rows, p: Pipeline) -> list:
     """서버 목록(GET /api/transcription/pipelines 응답) 중 이 파이프라인의 설정 버전들"""
     out = []
@@ -158,14 +210,16 @@ def server_versions(rows, p: Pipeline) -> list:
     return sorted(out)
 
 
-def listing(pipes: dict, root: Path | None = None) -> list:
-    """analyze.py --list-pipelines 한 줄씩(약속의 모양 그대로)."""
+def listing(pipes: dict, root: Path | None = None, local: dict | None = None) -> list:
+    """analyze.py --list-pipelines 한 줄씩(약속의 모양 그대로). 실행 옵션이 있으면 runOptionsSchema와 이 기기 값 runOptions(local = local_run_options)"""
     out = []
     for p in pipes.values():
         seed(p, root)
         vs = versions(p, root)
-        out.append({"name": p.name, "version": p.version, "description": p.description, "autoRecommend": p.auto_recommend,
-                    "settingsSchema": p.schema, "settingsVersions": vs, "latestSettingsVersion": vs[-1] if vs else None, "folder": str(p.folder), "hints": p.hints})
+        row = {"name": p.name, "version": p.version, "description": p.description, "autoRecommend": p.auto_recommend,
+               "settingsSchema": p.schema, "settingsVersions": vs, "latestSettingsVersion": vs[-1] if vs else None, "folder": str(p.folder), "hints": p.hints}
+        if p.run_schema: row.update(runOptionsSchema=p.run_schema, runOptions=run_values(p, local))
+        out.append(row)
     return out
 
 
@@ -209,15 +263,21 @@ class Throttle:
 
 
 def run(p: Pipeline, settings: dict, wav: Path, tmp: Path, words: bool = False, tools: Path | None = None,
-        hints: Path | None = None, used: set | None = None, on_progress=None) -> list:
+        hints: Path | None = None, used: set | None = None, on_progress=None, run_options: dict | None = None) -> list:
     """파이프라인 하나로 wav → 구간들 [{startMs, endMs, text, suspect?, original?}]. 실패하면 RuntimeError(stderr 끝)
     hints = 단어장 힌트 파일(매니페스트 hints인 파이프라인에만 넘긴다). used를 주면 O.json의 vocabUsed(쓴 단어장 id)를 더한다.
-    on_progress = 파이프라인이 낸 @@progress 줄마다 부르는 함수(parse_progress의 딕셔너리, 거르지 않음)."""
+    on_progress = 파이프라인이 낸 @@progress 줄마다 부르는 함수(parse_progress의 딕셔너리, 거르지 않음).
+    run_options = 실행 옵션 값(run_values). 매니페스트에 runOptions가 있으면 기본값을 채워 --run-options로 넘긴다."""
     s_path, o_path = tmp / f"{wav.stem}.settings.json", tmp / f"{wav.stem}.segments.json"
     s_path.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
+    extra = []
+    if p.run_schema:
+        r_path = tmp / f"{wav.stem}.run-options.json"
+        r_path.write_text(json.dumps(run_values(p, overrides=run_options), ensure_ascii=False), encoding="utf-8")
+        extra = ["--run-options", str(r_path)]
     o_path.unlink(missing_ok=True)
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "SECONDBRAIN_ANALYSIS_TOOLS": str(tools or sbpaths.TOOLS)}
-    cmd = [sys.executable, str(p.entry), "--wav", str(wav), "--out", str(o_path), "--settings", str(s_path)] + (["--words"] if words else []) + (["--hints", str(hints)] if hints and p.hints else [])
+    cmd = [sys.executable, str(p.entry), "--wav", str(wav), "--out", str(o_path), "--settings", str(s_path)] + (["--words"] if words else []) + (["--hints", str(hints)] if hints and p.hints else []) + extra
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=env, cwd=str(p.folder))
     err, other = [], deque(maxlen=20)   # 표준 오류는 따로 읽어(안 읽으면 가득 차 멈춘다) 끝만 남긴다
     reader = threading.Thread(target=lambda: err.extend(deque(proc.stderr, maxlen=20)), daemon=True)
