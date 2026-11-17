@@ -43,6 +43,8 @@ API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrai
   --pipeline을 안 주면 whisper-cpp@1에서 전사 모델(--asr-model → settings.json의 asrModel → batisay-ko-turbo-q8_0)이 같은 설정 버전(없으면 새로 씀).
   새로 쓰는 설정 버전 번호 = (이 PC, 서버 목록 GET /api/transcription/pipelines의 그 파이프라인) 중 최대 + 1. 서버 목록을 못 읽으면(옛 서버) 경고하고 이 PC 기준.
   미전사 = 어느 파이프라인의 결과도 없는 묶음(GET /api/recordings/analyzed). 다른 파이프라인으로 다시 돌리려면 --redo·--pick.
+  실행 옵션(2026-11-17, pipelines.py 머리말): 결과를 바꾸지 않는 이 기기 값(예: parallel). analysis/settings.json의 runOptions → --run-option 키=값(여러 번).
+  설정 버전·서버 기록에는 들어가지 않는다. python analyze.py --pipeline whisper-cpp@2 --run-option parallel=3 --source phone --pick X.m4a --dry-run
 단어장 힌트(2026-11-16, 계획 "3-① 단어장"): 매니페스트 hints인 파이프라인이고 설정 useHints가 꺼져 있지 않으면 묶음마다 POST /api/vocab/pick
   (통화면 caller = 통화 상대, max·maxChars = 설정 hintMax·hintChars)으로 힌트 파일을 만들어 --hints로 넘긴다. 서버를 못 읽으면 경고하고 이번 실행은 힌트 없이.
   올리기가 성공하면 파이프라인이 낸 vocabUsed(쓴 힌트·실제로 바꾼 고침 짝 id)로 POST /api/vocab/used(묶음 하나에 한 번). --plan은 고르지 않고, --dry-run은 고르기만.
@@ -52,7 +54,7 @@ API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrai
 단계(--stage, 2026-11-11): transcribe(기본) = 전사·화자 구분만 올린다(요약 비움). all = 예전처럼 전사하고 바로 요약
 """
 import argparse, datetime as dt, json, os, re, subprocess, sys, tempfile, time, urllib.parse, urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import bundles as B
@@ -144,12 +146,14 @@ class Chosen:
     pipe: P.Pipeline
     settings_version: int
     settings: dict
+    run_options: dict = field(default_factory=dict)   # 실행 옵션(결과를 바꾸지 않음, ref()에 넣지 않는다)
 
     def ref(self) -> dict:
         return {"name": self.pipe.name, "version": self.pipe.version, "settingsVersion": self.settings_version}
 
     def label(self) -> str:
-        return f"{self.pipe.key} 설정 {self.settings_version} (" + ", ".join(f"{k}={v}" for k, v in self.settings.items()) + ")"
+        run = (", 실행 옵션 " + ", ".join(f"{k}={v}" for k, v in self.run_options.items())) if self.run_options else ""
+        return f"{self.pipe.key} 설정 {self.settings_version} (" + ", ".join(f"{k}={v}" for k, v in self.settings.items()) + ")" + run
 
 
 CHOSEN: "Chosen | None" = None   # main()이 정한다
@@ -201,6 +205,23 @@ def choose_pipeline(pipeline: str | None, settings_version: int | None, asr_mode
     return c
 
 
+def run_option_arg(text: str) -> tuple:
+    try:
+        return P.parse_run_option(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
+def run_options_for(p: P.Pipeline, pairs: list, warn=None, local: dict | None = None) -> dict:
+    """이번 실행의 실행 옵션: 매니페스트 기본값 ← analysis/settings.json runOptions ← --run-option. 매니페스트에 없는 --run-option 키는 경고하고 버린다"""
+    over, schema = dict(pairs or []), p.run_schema or {}
+    if warn and (unknown := [k for k in over if k not in schema]):
+        warn(f"{p.key}에 없는 실행 옵션은 버립니다: {', '.join(unknown)}")
+    if warn and (wrong := [k for k, v in over.items() if k in schema and not P.fits(schema[k].get("type", "string"), v)]):
+        warn(f"형식이 틀린 실행 옵션은 버립니다(기본값): {', '.join(wrong)}")
+    return P.run_values(p, P.local_run_options(M.settings_path()) if local is None else local, over)
+
+
 def server_settings_versions(p: P.Pipeline, warn) -> list:
     """서버 목록(GET /api/transcription/pipelines, 읽기만)의 그 파이프라인 설정 버전들. 못 읽으면(옛 서버·연결 안 됨) 경고하고 []"""
     try:
@@ -213,7 +234,8 @@ def server_settings_versions(p: P.Pipeline, warn) -> list:
 def transcribe(wav: Path, tmp: Path, words: bool = False, hints: Path | None = None, used: set | None = None, on_progress=None):
     """이번 실행의 파이프라인으로 wav → 구간. words=True면 단어마다 한 구간(화자 구분 assign_speakers가 화자별로 다시 묶는다).
     hints = 단어장 힌트 파일, used = 쓴 단어장 id를 모을 집합, on_progress = 파이프라인이 낸 진행(percent·text)을 받는 함수"""
-    return P.run(CHOSEN.pipe, CHOSEN.settings, wav, tmp, words=words, tools=A, hints=hints, used=used, on_progress=on_progress)
+    return P.run(CHOSEN.pipe, CHOSEN.settings, wav, tmp, words=words, tools=A, hints=hints, used=used, on_progress=on_progress,
+                 run_options=CHOSEN.run_options)
 
 
 def transcribe_reporter(file: int, files: int):
@@ -528,6 +550,8 @@ def main():
     ap.add_argument("--call", help="이 파일 이름이 든 디스코드 통화(callSources 묶음들)의 미전사 묶음 전부(--redo면 전부)")
     ap.add_argument("--pipeline", help=f"전사 파이프라인 <이름>@<버전>(--list-pipelines). 없으면 {LEGACY_PIPELINE}(전사 모델 = --asr-model → settings.json)")
     ap.add_argument("--settings-version", type=int, help="파이프라인 설정 버전(없으면 최신)")
+    ap.add_argument("--run-option", action="append", type=run_option_arg, default=[], metavar="KEY=VALUE",
+                    help="실행 옵션(결과를 바꾸지 않음, 예: parallel=3). analysis/settings.json의 runOptions 위에 얹는다. 설정 버전에 들어가지 않음")
     ap.add_argument("--list-pipelines", action="store_true", help="이 PC의 전사 파이프라인과 설정 버전을 JSON으로 보이고 끝낸다")
     ap.add_argument("--asr-model", help=f"전사 모델 이름(models/ggml-<이름>.bin) → {LEGACY_PIPELINE}에서 asrModel이 그것인 설정 버전. 없으면 settings.json의 asrModel → " + M.DEFAULT)
     ap.add_argument("--list-models", action="store_true", help="쓸 수 있는 전사 모델과 기본값을 JSON으로 보이고 끝낸다")
@@ -549,13 +573,14 @@ def main():
         return
     warn = lambda m: print("  " + m, file=sys.stderr)
     if a.list_pipelines:
-        print(json.dumps(P.listing(P.discover(warn=warn)), ensure_ascii=False))
+        print(json.dumps(P.listing(P.discover(warn=warn), local=P.local_run_options(M.settings_path())), ensure_ascii=False))
         return
     global CHOSEN
     if not a.sweep_silent:
         try:
             CHOSEN = choose_pipeline(a.pipeline, a.settings_version, a.asr_model, P.discover(warn=warn), create=not a.plan,
                                      server=lambda p: server_settings_versions(p, warn))
+            CHOSEN.run_options = run_options_for(CHOSEN.pipe, a.run_option, warn)
         except ValueError as e:
             if not a.plan:
                 progress("error", message=str(e)); print(e); sys.exit(2)

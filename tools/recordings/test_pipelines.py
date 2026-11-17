@@ -12,6 +12,7 @@ ap = argparse.ArgumentParser()
 for k in ("--wav", "--out", "--settings"): ap.add_argument(k, required=True)
 ap.add_argument("--words", action="store_true")
 ap.add_argument("--hints")
+ap.add_argument("--run-options")
 a = ap.parse_args()
 s = json.load(open(a.settings, encoding="utf-8"))
 for line in s.get("stdout") or []: print(line, flush=True)
@@ -24,7 +25,8 @@ used = []
 if a.hints:
     h = json.load(open(a.hints, encoding="utf-8"))
     segs[0]["original"], segs[0]["text"], used = segs[0]["text"], h["prompt"], h["ids"]
-open(a.out, "w", encoding="utf-8").write(json.dumps({"segments": segs, "wav": a.wav, "vocabUsed": used}, ensure_ascii=False))
+run = json.load(open(a.run_options, encoding="utf-8")) if a.run_options else None
+open(a.out, "w", encoding="utf-8").write(json.dumps({"segments": segs, "wav": a.wav, "vocabUsed": used, "run": run}, ensure_ascii=False))
 '''
 
 
@@ -201,6 +203,66 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(used, {3, 8})
         self.assertNotIn("original", P.run(p, P.effective(p, {}), wav, work)[0])   # 힌트 파일 없으면 그대로
 
+    RUN = {"parallel": {"type": "number", "default": 2, "label": "동시"}, "fast": {"type": "bool", "default": False, "label": "빠르게"}}
+
+    def test_run_options_manifest(self):
+        p = P.load(make(self.repo, runOptions=self.RUN))
+        self.assertEqual((p.run_schema, P.run_defaults(p)), (self.RUN, {"parallel": 2, "fast": False}))
+        self.assertEqual(P.defaults(p), {"text": "안녕 하세요", "fail": False})   # 설정 기본값에 안 섞임
+        q = P.load(make(self.repo, "plain"))
+        self.assertEqual((q.run_schema, P.run_defaults(q), P.run_values(q, {"plain": {"parallel": 3}}, {"parallel": 4})), ({}, {}, {}))
+        with self.assertRaisesRegex(ValueError, "runOptions"):
+            P.load(make(self.repo, "bad", runOptions={"parallel": 2}))
+        with self.assertRaisesRegex(ValueError, "같은 키"):
+            P.load(make(self.repo, "dup", runOptions={"text": {"type": "string", "default": "x"}}))
+
+    def test_run_values_layers_and_types(self):
+        p = P.load(make(self.repo, runOptions=self.RUN))
+        local = {"fake": {"parallel": 3, "fast": True}, "fake@1": {"parallel": 4, "nope": 1}, "fake@2": {"parallel": 9}, "other@1": {"parallel": 7}}
+        self.assertEqual(P.run_values(p, local), {"parallel": 4, "fast": True})          # 이름@버전 > 이름, 다른 버전·없는 키는 무시
+        self.assertEqual(P.run_values(p, local, {"parallel": 1}), {"parallel": 1, "fast": True})   # --run-option이 맨 위
+        self.assertEqual(P.run_values(p, {"fake": {"parallel": "3", "fast": 1}}, {"parallel": True}), {"parallel": 2, "fast": False})   # 형식이 틀리면 기본값
+        self.assertEqual(P.run_values(p, {"fake": [1], "fake@1": None}), P.run_defaults(p))
+        self.assertEqual(P.run_values(p, None, None), P.run_defaults(p))
+
+    def test_local_run_options_file(self):
+        f = self.root / "settings.json"
+        self.assertEqual(P.local_run_options(f), {})                     # 파일 없음
+        f.write_text('{"asrModel": "x"}', encoding="utf-8")
+        self.assertEqual(P.local_run_options(f), {})
+        f.write_text('﻿{"asrModel": "x", "runOptions": {"fake@1": {"parallel": 3}}}', encoding="utf-8")
+        self.assertEqual(P.local_run_options(f), {"fake@1": {"parallel": 3}})
+        for broken in ("{깨짐", "[1]", '{"runOptions": 3}'):
+            f.write_text(broken, encoding="utf-8")
+            self.assertEqual(P.local_run_options(f), {})
+
+    def test_parse_run_option(self):
+        self.assertEqual([P.parse_run_option(t) for t in ("parallel=3", " fast = true", "name=abc", "x=")],
+                         [("parallel", 3), ("fast", True), ("name", "abc"), ("x", "")])
+        for bad in ("parallel", "=3"):
+            with self.assertRaises(ValueError): P.parse_run_option(bad)
+
+    def test_run_passes_run_options_only_when_declared(self):
+        wav = self.root / "p0.wav"; wav.write_bytes(b"")
+        work = self.root / "work"; work.mkdir()
+        out = lambda: json.loads((work / "p0.segments.json").read_text(encoding="utf-8"))
+        plain = P.load(make(self.repo))
+        P.run(plain, P.effective(plain, {}), wav, work, run_options={"parallel": 3})
+        self.assertIsNone(out()["run"])                                   # runOptions 없는 파이프라인(옛 약속)에는 안 넘김
+        p = P.load(make(self.repo, "multi", runOptions=self.RUN))
+        P.run(p, P.effective(p, {}), wav, work)
+        self.assertEqual(out()["run"], {"parallel": 2, "fast": False})    # 값을 안 주면 기본값
+        P.run(p, P.effective(p, {}), wav, work, run_options={"parallel": 3, "nope": 1})
+        self.assertEqual(out()["run"], {"parallel": 3, "fast": False})
+        self.assertNotIn("parallel", json.loads((work / "p0.settings.json").read_text(encoding="utf-8")))   # 설정 파일에는 없음
+
+    def test_listing_run_options(self):
+        p = P.load(make(self.repo, runOptions=self.RUN))
+        [row] = P.listing({p.key: p}, self.settings, local={"fake": {"parallel": 3}})
+        self.assertEqual((row["runOptionsSchema"], row["runOptions"]), (self.RUN, {"parallel": 3, "fast": False}))
+        q = P.load(make(self.repo, "plain"))
+        self.assertNotIn("runOptions", P.listing({q.key: q}, self.settings)[0])
+
     def test_whisper_cpp_1_manifest(self):
         pipes = P.discover([HERE / "pipelines"])
         p = pipes["whisper-cpp@1"]
@@ -327,6 +389,29 @@ class ChooseTests(unittest.TestCase):
                           (("whisper-cpp@1", 5, None), "설정 버전 5"), (("whisper-cpp", None, None), "<이름>@<버전>")):
             with self.assertRaisesRegex(ValueError, msg): self.choose(*args)
         self.assertEqual(P.versions(self.pipes["whisper-cpp@1"], self.settings), [1])   # 없는 모델로 설정 버전을 쓰지 않음
+
+    def test_run_options_not_in_settings_version_or_ref(self):
+        """실행 옵션(parallel)은 설정 버전을 새로 만들지 않고 서버 기록(ref)에도 없다. analysis/settings.json runOptions ← --run-option"""
+        for key in ("whisper-cpp@2", "whisper-lite@1"):
+            c = self.choose(key)
+            p, before = c.pipe, P.versions(c.pipe, self.settings)
+            self.assertNotIn("parallel", c.settings)
+            self.assertEqual(P.run_defaults(p), {"parallel": 2})
+            warns = []
+            local = {key.split("@")[0]: {"parallel": 3}}
+            c.run_options = self.A.run_options_for(p, [("parallel", 1), ("nope", 2), ("x", 1)], warns.append, local=local)
+            self.assertEqual(c.run_options, {"parallel": 1})
+            self.assertEqual(len(warns), 1)                                 # 없는 키 경고(형식은 맞음)
+            self.assertEqual(self.A.run_options_for(p, [], local=local), {"parallel": 3})
+            self.assertEqual(self.A.run_options_for(p, [("parallel", "많이")], warns.append, local={}), {"parallel": 2})
+            self.assertIn("형식", warns[-1])
+            self.assertEqual(c.ref(), {"name": p.name, "version": p.version, "settingsVersion": c.settings_version})
+            self.assertIn("실행 옵션 parallel=1", c.label())
+            self.assertEqual(self.choose(key).settings_version, c.settings_version)   # 다시 골라도 같은 설정 버전
+            self.assertEqual(P.versions(p, self.settings), before)
+        (self.root / "settings.json").write_text('{"runOptions": {"whisper-cpp@2": {"parallel": 5}}}', encoding="utf-8")
+        self.assertEqual(self.A.run_options_for(self.pipes["whisper-cpp@2"], []), {"parallel": 5})   # 이 기기 설정 파일(asrmodels.settings_path)
+        self.assertEqual(self.A.run_options_for(self.pipes["fake@1"], [("parallel", 3)]), {})
 
     def test_other_pipeline_latest_or_defaults(self):
         c = self.choose("fake@1")

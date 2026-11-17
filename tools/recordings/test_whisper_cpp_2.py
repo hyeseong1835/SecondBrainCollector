@@ -1,5 +1,5 @@
 """python -m unittest test_whisper_cpp_2 (가짜 데이터만, whisper는 돌리지 않음)"""
-import importlib.util, json, sys, tempfile, unittest, wave
+import importlib.util, json, sys, tempfile, threading, time, unittest, wave
 from pathlib import Path
 import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
@@ -112,7 +112,7 @@ class TranscribeTests(unittest.TestCase):
         x = np.full(16000 * 70, 1000, np.int16); x[16000 * 25:16000 * 25 + 1600] = 0   # 70초, 25.0~25.1초 무음
         with wave.open(str(self.wav), "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(x.tobytes())
-        self.calls, self.texts = [], {}
+        self.calls, self.texts, self.parallels = [], {}, []
         self.orig = T.whisper
         T.whisper = self.fake
 
@@ -120,8 +120,9 @@ class TranscribeTests(unittest.TestCase):
         T.whisper = self.orig
         self.tmp.cleanup()
 
-    def fake(self, base, names, work, progress=None):
+    def fake(self, base, names, work, progress=None, parallel=1):
         self.calls.append((base, names))
+        self.parallels.append(parallel)
         retry = "-tp" in base
         for n in names:
             text = self.texts.get((n, retry), self.texts.get((n, False), ""))
@@ -151,7 +152,7 @@ class TranscribeTests(unittest.TestCase):
         plain = self.run_it()
         plain_calls = list(self.calls)
 
-        def fake(base, names, work, progress=None):
+        def fake(base, names, work, progress=None, parallel=1):
             for i in range(len(names) if progress else 0):   # 조각마다 0%, 100% 줄
                 progress(i, len(names), 0.0); progress(i, len(names), 100.0)
             self.fake(base, names, work)
@@ -167,7 +168,7 @@ class TranscribeTests(unittest.TestCase):
     def test_whisper_counts_finished_chunks_and_adds_pp(self):
         cmds, got = [], []
 
-        def fake(cmd, work, on_percent=None):
+        def fake(cmd, work, on_percent=None, started=None):
             cmds.append((cmd, work))
             stems = [cmd[i + 1] for i, x in enumerate(cmd) if x == "-of"]
             for k, stem in enumerate(stems):
@@ -187,6 +188,152 @@ class TranscribeTests(unittest.TestCase):
         self.assertEqual(got[1:3], [(0, 45, 100.0), (1, 45, 10.0)])   # .json이 생긴 조각만 끝난 것
         self.assertEqual(got[-1], (44, 45, 100.0))
         self.assertEqual(self.orig(["whisper"], [], self.work), None)
+
+    def test_split_names(self):
+        names = [f"c{k}" for k in range(7)]
+        self.assertEqual(T.split_names(names, 1), [names])
+        self.assertEqual(T.split_names(names, 3), [["c0", "c3", "c6"], ["c1", "c4"], ["c2", "c5"]])   # 번갈아
+        self.assertEqual(T.split_names(names[:2], 4), [["c0"], ["c1"]])   # 빈 몫은 뺌
+        self.assertEqual(T.split_names([], 2), [])
+        self.assertEqual(T.split_names(names, 0), [names])
+        self.assertEqual(T.split_names(names, None), [names])
+
+    def fake_run(self, script):
+        """run_whisper 대신: script(cmd 안의 조각 stem들, on_percent, proc) → 종료 코드. .json은 script가 쓴다"""
+        cmds = []
+
+        class Proc:
+            def __init__(self): self.killed = threading.Event()
+            def kill(self): self.killed.set()
+            def poll(self): return 1 if self.killed.is_set() else None
+
+        def fake(cmd, work, on_percent=None, started=None):
+            p = Proc()
+            stems = [cmd[i + 1] for i, x in enumerate(cmd) if x == "-of"]
+            with lock: cmds.append((stems, p))
+            if started: started(p)
+            code = script(stems, on_percent or (lambda pct: None), p)
+            return code, "원인" if code else ""
+        lock = threading.Lock()
+        old = T.run_whisper
+        T.run_whisper = fake
+        self.addCleanup(setattr, T, "run_whisper", old)
+        return cmds
+
+    def test_whisper_parallel_splits_and_batches(self):
+        names = [f"c{k:04d}.wav" for k in range(85)]
+
+        def script(stems, on_percent, p):
+            for stem in stems:
+                on_percent(50.0)
+                (self.work / f"{stem}.json").write_text("{}", encoding="utf-8")
+            return 0
+        cmds = self.fake_run(script)
+        got = []
+        self.orig(["whisper"], names, self.work, lambda d, t, pct: got.append((d, t, pct)), 2)
+        self.assertEqual(sorted(len(c[0]) for c in cmds), [2, 3, 40, 40])   # 작업자 2개(43·42조각), 작업자마다 BATCH 40
+        self.assertEqual(sorted(s for c in cmds for s in c[0]), [Path(n).stem for n in names])   # 빠짐·겹침 없음
+        self.assertTrue(all(c[0][0][1:].isdigit() and int(c[0][0][1:]) % 2 == int(c[0][-1][1:]) % 2 for c in cmds))   # 한 실행 안은 같은 작업자 몫
+        self.assertEqual([d for d, _, _ in got], sorted(d for d, _, _ in got))   # 끝난 조각 수는 줄지 않는다
+        self.assertEqual(got[-1][:2], (84, 85)); self.assertTrue(all(t == 85 and p == 50.0 for _, t, p in got))
+
+    def test_whisper_parallel_progress_average_and_lock(self):
+        names = [f"c{k:04d}.wav" for k in range(4)]
+        both = threading.Barrier(2, timeout=5)
+
+        def script(stems, on_percent, p):
+            if stems[0] == "c0000": on_percent(20.0); both.wait()   # 작업자 0이 20%를 낸 뒤에
+            else: both.wait(); on_percent(60.0)                     # 작업자 1이 60% → 평균 40
+            for stem in stems:
+                for _ in range(30): on_percent(100.0)
+                (self.work / f"{stem}.json").write_text("{}", encoding="utf-8")
+            return 0
+        self.fake_run(script)
+        got, busy, overlap = [], [False], []
+
+        def progress(done, total, pct):
+            if busy[0]: overlap.append(1)
+            busy[0] = True; time.sleep(0.0005); got.append((done, total, pct)); busy[0] = False
+        self.orig(["whisper"], names, self.work, progress, 2)
+        self.assertEqual(got[:2], [(0, 4, 20.0), (0, 4, 40.0)])
+        self.assertEqual(overlap, [])   # 진행 콜백은 한 번에 하나씩
+        self.assertEqual([d for d, _, _ in got], sorted(d for d, _, _ in got))   # 끝난 조각 수는 줄지 않는다(마지막 .json은 진행 줄 뒤라 3 이하)
+
+    def test_whisper_parallel_failure_kills_others(self):
+        names = [f"c{k:04d}.wav" for k in range(4 * T.BATCH)]
+
+        def script(stems, on_percent, p):
+            if int(stems[0][1:]) % 2 == 0:   # 작업자 0: 죽을 때까지 돈다
+                self.assertTrue(p.killed.wait(5)); return 1
+            return 3                         # 작업자 1: 첫 실행에서 실패
+        cmds = self.fake_run(script)
+        with self.assertRaises(SystemExit) as e:
+            self.orig(["whisper"], names, self.work, None, 2)
+        self.assertEqual(str(e.exception.code), "whisper 실패: 원인")
+        self.assertEqual(len(cmds), 2)   # 작업자 0도 다음 묶음을 띄우지 않음
+        self.assertTrue(all(p.killed.is_set() for stems, p in cmds if int(stems[0][1:]) % 2 == 0))
+
+    def test_whisper_parallel_reraises_exception(self):
+        def script(stems, on_percent, p):
+            if stems[0] == "c0001": raise OSError("못 띄움")
+            self.assertTrue(p.killed.wait(5)); return 1
+        self.fake_run(script)
+        with self.assertRaises(OSError):
+            self.orig(["whisper"], ["c0000.wav", "c0001.wav"], self.work, None, 2)
+
+    def test_parallel_run_option_passed_and_same_result(self):
+        """실행 옵션 parallel은 첫 전사·다시 돌리기 모두 whisper()로 넘어가고, 값이 달라도 구간은 같다(통계는 parallel만 다름).
+        설정(S.json)에 parallel이 있어도 쓰지 않는다(설정이 아니다)"""
+        bad = " ".join(["데스라인 벤션 2차 강화입니다."] * 10)
+        self.texts = {("c0000.wav", False): "안녕하세요", ("c0001.wav", False): bad, ("c0001.wav", True): "버스 안내 방송", ("c0002.wav", False): "으" * 200}
+        self.assertNotIn("parallel", SETTINGS)
+        run = lambda opts, **s: T.transcribe(self.wav, self.work, {**SETTINGS, **s}, False, self.tools, None, None, opts)[:2]
+        one = run({"parallel": 1})
+        self.assertEqual(self.parallels, [1, 1])
+        self.parallels.clear()
+        three = run({"parallel": 3})
+        self.assertEqual(self.parallels, [3, 3])
+        self.assertEqual(one[0], three[0])
+        self.assertEqual({**one[1], "parallel": 3}, three[1])
+        self.parallels.clear()
+        run(None, parallel=4)   # --run-options가 없으면(직접 실행) 1
+        self.assertEqual(self.parallels, [1, 1])
+
+    def test_main_reads_run_options_file(self):
+        """transcribe.py --run-options R.json → transcribe(run=...)"""
+        got = []
+        old = T.transcribe
+        T.transcribe = lambda wav, work, settings, words, tools, hints, progress, run: got.append((settings, run)) or ([], {}, [])
+        self.addCleanup(setattr, T, "transcribe", old)
+        s, r, o = self.work / "s.json", self.work / "r.json", self.work / "o.json"
+        s.write_text(json.dumps(SETTINGS), encoding="utf-8"); r.write_text('{"parallel": 3}', encoding="utf-8")
+        argv = sys.argv
+        try:
+            sys.argv = ["transcribe.py", "--wav", str(self.wav), "--out", str(o), "--settings", str(s), "--run-options", str(r)]; T.main()
+            sys.argv = sys.argv[:-2]; T.main()
+        finally:
+            sys.argv = argv
+        self.assertEqual([x[1] for x in got], [{"parallel": 3}, {}])
+        self.assertEqual(got[0][0], SETTINGS)
+
+    def test_whisper_parallel_real_processes(self):
+        """진짜 하위 프로세스로: 작업자 2개가 동시에 돌고 .json이 다 생긴다"""
+        child = "\n".join(["import os, sys, time",
+                           "t0, a = time.time(), sys.argv[1:]",
+                           "for i, x in enumerate(a):",
+                           "    if x == '-of':",
+                           "        print('whisper_print_progress_callback: progress = 50%', flush=True); time.sleep(0.3)",
+                           "        open(a[i + 1] + '.json', 'w').write('{}')",
+                           "open(f'{os.getpid()}.span', 'w').write(f'{t0} {time.time()}')", ""])
+        script = self.work / "child.py"; script.write_text(child, encoding="utf-8")
+        names = [f"c{k:04d}.wav" for k in range(4)]
+        got = []
+        self.orig([sys.executable, str(script)], names, self.work, lambda *a: got.append(a), 2)
+        spans = [tuple(map(float, f.read_text().split())) for f in self.work.glob("*.span")]
+        self.assertEqual(len(spans), 2)
+        self.assertLess(max(a for a, _ in spans), min(b for _, b in spans))   # 두 whisper-cli가 겹쳐 돌았다
+        self.assertTrue(all((self.work / f"{Path(n).stem}.json").exists() for n in names))
+        self.assertEqual(len(got), 4)
 
     def test_run_whisper_reads_progress(self):
         child = "\n".join(["import sys", "e = lambda t: print(t, file=sys.stderr, flush=True)",
@@ -217,7 +364,7 @@ class TranscribeTests(unittest.TestCase):
         self.assertEqual(stats["droppedChunks"], 1)
 
     def test_broken_utf8_from_whisper(self):
-        def broken(base, names, work, progress=None):
+        def broken(base, names, work, progress=None, parallel=1):
             for n in names:   # "안녕" 뒤에 "하"(ED 95 98)의 앞 두 바이트만
                 raw = '{"transcription": [{"offsets": {"from": 0, "to": 500}, "text": "안녕'.encode() + b"\xed\x95" + b'"}]}'
                 (work / (Path(n).stem + ".json")).write_bytes(raw)
@@ -257,6 +404,12 @@ class TranscribeTests(unittest.TestCase):
         self.assertEqual(P.seed(p, root), [1])
         self.assertEqual(P.read(p, 1, root), SETTINGS)
         self.assertEqual(SETTINGS["maxContext"], 0)
+        # parallel은 실행 옵션: 설정 스키마·설정 버전에 없고, 기본값으로 찾으면 씨앗 1 그대로(새 설정 버전을 쓰지 않음)
+        self.assertNotIn("parallel", p.schema)
+        self.assertEqual(p.run_schema["parallel"]["default"], 2)
+        self.assertEqual(P.run_defaults(p), {"parallel": 2})
+        self.assertEqual(P.find_or_write(p, P.defaults(p), root), 1)
+        self.assertEqual(P.versions(p, root), [1])
 
 
 class VocabTests(unittest.TestCase):

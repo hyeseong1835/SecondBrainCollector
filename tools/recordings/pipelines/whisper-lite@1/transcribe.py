@@ -1,7 +1,7 @@
 """전사 파이프라인 whisper-lite@1(2026-11-17): whisper-cpp@2의 반복 억제는 그대로 두고 계산을 줄인 것. 공개 뒤에는 고치지 않는다(바꾸면 whisper-lite@2).
 계획: 음성 전사 개선 계획.md "가벼운 파이프라인". 가벼움의 우선순위는 ① 전사 시간 ② GPU 점유 ③ 메모리.
 
-  python transcribe.py --wav W --out O.json --settings S.json [--words] [--hints H.json]
+  python transcribe.py --wav W --out O.json --settings S.json [--words] [--hints H.json] [--run-options R.json]
   → O.json = {"segments": [{startMs, endMs, text, suspect?, original?}], "stats": {...}, "vocabUsed": [id]}
 
 @2와 같은 것: 앞 글 힌트 끔(-mc 0), 30초 안팎 조각마다 따로 전사(조각마다 whisper.cpp Silero VAD), 조각 품질 검사(quality.py, @2를 베낌),
@@ -22,8 +22,13 @@
 - stats.whisper: whisper-cli가 찍는 시간(인코더·디코더·VAD ms·횟수, 실행마다 더함), startup = 실행부터 첫 조각까지(모델 올리기·GPU 준비).
   stats.passSec: 첫 전사·다시 돌리기 걸린 초. stats.vad: {engine, sec, spans, speechSec}(sherpa일 때 VAD 시간·구간 수·말소리 길이).
 - 도구·모델 폴더: 환경 변수 SECONDBRAIN_ANALYSIS_TOOLS(analyze.py가 넘김) → %LOCALAPPDATA%/SecondBrain/analysis
+- 동시 실행(2026-11-17 KST, 결과를 바꾸지 않아 같은 버전): 실행 옵션 parallel(--run-options, 매니페스트 runOptions 기본 2, 설정 버전에 들어가지 않는다.
+  파일이 없으면 1)만큼 whisper-cli를 동시에 띄운다. 조각을 작업자마다 번갈아 나누고(조각·인자가 같으니 조각마다 결과는 같다) 작업자마다 BATCH씩.
+  useGpu = false(CPU로만, seed 2)면 늘 1: 프로세스마다 -t 스레드가 같은 CPU를 다투고 메울 GPU 빈틈도 없어서.
+  하나라도 실패하면 나머지를 죽이고 "whisper 실패". 진행도 = 시작한 조각 수 - 지금 조각을 돌고 있는 작업자 수(parallel 1이면 전과 같다).
+  stats.parallel = 실제로 쓴 수. stats.whisper의 ms는 프로세스마다 더한 값이라 parallel > 1이면 걸린 시간(passSec)보다 클 수 있다.
 """
-import argparse, collections, json, os, re, subprocess, sys, time, wave
+import argparse, collections, json, os, re, subprocess, sys, threading, time, wave
 from pathlib import Path
 import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
@@ -190,11 +195,18 @@ def add_timings(total: dict, line: str):
     if m: add_time(total, m.group(1), float(m.group(2)), int(m.group(3) or 0))
 
 
+def split_names(names: list, n: int) -> list:
+    """조각 이름들 → 작업자 n개 몫(번갈아 나눔: 앞뒤 조각 길이가 달라도 고르게). 빈 몫은 뺀다"""
+    n = max(1, int(n or 1))
+    return [g for g in (names[i::n] for i in range(n)) if g]
+
+
 class Whisper:
-    """whisper-cli 실행기. 조각마다 진행도를 내고 시간 통계를 모은다"""
-    def __init__(self, base: list, work: Path):
-        self.base, self.work = base, work
+    """whisper-cli 실행기. 조각마다 진행도를 내고 시간 통계를 모은다. parallel개까지 동시에(통계·진행 콜백은 잠금 안에서)"""
+    def __init__(self, base: list, work: Path, parallel: int = 1):
+        self.base, self.work, self.parallel = base, work, max(1, int(parallel or 1))
         self.timings, self.gpu, self.vulkan = {}, None, {}
+        self.lock = threading.Lock()
 
     def device(self) -> str:
         if not self.gpu: return "CPU"
@@ -202,38 +214,78 @@ class Whisper:
         return self.vulkan.get(m.group(1), self.gpu) if m else self.gpu
 
     def run(self, names: list, extra: list, on_chunk):
-        """조각 wav 이름들 → 같은 이름의 .json(work 안, 상대 경로로 명령줄을 줄인다). on_chunk(이번 실행에서 시작한 조각 수)"""
-        done = 0
-        for i in range(0, len(names), BATCH):
+        """조각 wav 이름들 → 같은 이름의 .json(work 안, 상대 경로로 명령줄을 줄인다). 조각을 작업자 parallel개에 번갈아 나누고 작업자마다 BATCH씩.
+        on_chunk(이번 실행에서 시작한 조각 수, 지금 조각을 돌고 있는 작업자 수) = 'processing' 줄마다(잠금 안에서 한 번에 하나씩).
+        하나라도 실패하면 나머지 whisper-cli를 죽이고 sys.exit("whisper 실패: ...")"""
+        groups = split_names(names, self.parallel)
+        lock, stop = self.lock, threading.Event()
+        started, busy, procs, errors = [0], [False] * len(groups), [], []
+
+        def fail(err):
+            with lock:
+                if not stop.is_set(): errors.append(err)   # 처음 실패만(죽인 작업자의 종료 코드는 원인이 아니다)
+                stop.set()
+                for q in procs:
+                    if q.poll() is None: q.kill()
+
+        def one(w: int, batch: list) -> bool:
             cmd = self.base + extra
-            for n in names[i:i + BATCH]: cmd += ["-f", n, "-of", Path(n).stem]
+            for n in batch: cmd += ["-f", n, "-of", Path(n).stem]
             tail, vad_ms, t0, first = collections.deque(maxlen=20), 0.0, time.time(), True
             p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", cwd=str(self.work))
-            for line in p.stderr:
-                tail.append(line.rstrip())
-                if PROCESSING.search(line):
-                    if first:
-                        add_time(self.timings, "startup", (time.time() - t0) * 1000); first = False
-                    done += 1; on_chunk(done)
-                elif m := VAD_TIME.search(line):
-                    vad_ms = float(m.group(1))
-                elif "whisper_print_timings" in line:
-                    add_timings(self.timings, line)
-                elif self.gpu is None and (m := GPU.search(line)):
-                    self.gpu = m.group(1)
-                elif m := VULKAN.search(line):
-                    self.vulkan[m.group(1)] = m.group(2).strip()
+            with lock:
+                procs.append(p)
+                if stop.is_set(): p.kill()   # 다른 작업자가 이미 실패했다
+            try:
+                for line in p.stderr:
+                    tail.append(line.rstrip())
+                    if PROCESSING.search(line):
+                        with lock:
+                            if first:
+                                add_time(self.timings, "startup", (time.time() - t0) * 1000); first = False
+                            started[0] += 1; busy[w] = True
+                            on_chunk(started[0], sum(busy))
+                    elif m := VAD_TIME.search(line):
+                        vad_ms = float(m.group(1))
+                    elif "whisper_print_timings" in line:
+                        with lock: add_timings(self.timings, line)
+                    elif self.gpu is None and (m := GPU.search(line)):
+                        with lock: self.gpu = self.gpu or m.group(1)
+                    elif m := VULKAN.search(line):
+                        with lock: self.vulkan[m.group(1)] = m.group(2).strip()
+            finally:
+                with lock: busy[w] = False
+                p.stderr.close()
             if p.wait() != 0:
-                sys.exit("whisper 실패: " + "\n".join(tail)[-400:])
-            add_time(self.timings, "vad", vad_ms)
+                fail("whisper 실패: " + "\n".join(tail)[-400:])
+                return False
+            with lock: add_time(self.timings, "vad", vad_ms)
+            return True
+
+        def work(w: int, group: list):
+            try:
+                for i in range(0, len(group), BATCH):
+                    if stop.is_set() or not one(w, group[i:i + BATCH]): return
+            except BaseException as e:
+                fail(e)
+        if len(groups) <= 1:
+            for g in groups: work(0, g)
+        else:
+            threads = [threading.Thread(target=work, args=(w, g), daemon=True) for w, g in enumerate(groups)]
+            for t in threads: t.start()
+            for t in threads: t.join()
+        if errors:
+            if isinstance(errors[0], BaseException): raise errors[0]
+            sys.exit(errors[0])
 
 
 def badness(fails: list, m: dict) -> tuple:
     return (len(fails), m["phraseRepeat"], m["charRun"], m["compression"])
 
 
-def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, hints: dict | None = None) -> tuple:
-    """→ (구간들, 통계, 쓴 단어장 id들). hints = vocab.load() 결과(없으면 힌트 없이)"""
+def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, hints: dict | None = None, run: dict | None = None) -> tuple:
+    """→ (구간들, 통계, 쓴 단어장 id들). hints = vocab.load() 결과(없으면 힌트 없이).
+    run = 실행 옵션(결과를 바꾸지 않음): parallel(없으면 1, useGpu = false면 늘 1)"""
     hints = hints if hints and settings.get("useHints", True) else None
     prompt = hints["prompt"] if hints else ""
     exe = tools / "src" / "whisper.cpp" / "build" / "bin" / "whisper-cli.exe"
@@ -263,13 +315,14 @@ def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, 
         name = f"c{k:04d}.wav"
         write_wav(work / name, chunk_audio(samples, pieces))
         names.append(name)
-    w = Whisper(base_args(exe, model, vad if engine == "whisper" else None, settings, words, prompt), work)
+    par = max(1, int((run or {}).get("parallel") or 1)) if settings.get("useGpu", True) else 1
+    w = Whisper(base_args(exe, model, vad if engine == "whisper" else None, settings, words, prompt), work, par)
     # whisper-cli가 한글 한 글자를 토큰 경계에서 잘라 깨진 UTF-8을 낼 때가 있다(2026-11-16 단어 단위 실측). 깨진 바이트는 버린다
     load = lambda k: chunk_segments(json.loads((work / f"c{k:04d}.json").read_bytes().decode("utf-8", errors="replace")), chunks[k])
     m = len(chunks)
     progress(0, f"조각 0/{m}")
     t0 = time.time()
-    w.run(names, [], lambda i: progress(90 * (i - 1) / m, f"조각 {i}/{m}"))
+    w.run(names, [], lambda i, busy: progress(90 * (i - busy) / m, f"조각 {i}/{m}"))
     pass_sec = [round(time.time() - t0, 1)]
     result = [load(k) for k in range(m)]
     checks = [Q.failures(Q.metrics(segs), settings) for segs in result]
@@ -279,7 +332,7 @@ def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, 
         for k in bad: (work / f"c{k:04d}.json").unlink(missing_ok=True)
         r = len(bad)
         t1 = time.time()
-        w.run([names[k] for k in bad], ["-tp", str(temp)], lambda i: progress(90 + 10 * (i - 1) / r, f"다시 돌리는 중 {i}/{r}"))
+        w.run([names[k] for k in bad], ["-tp", str(temp)], lambda i, busy: progress(90 + 10 * (i - busy) / r, f"다시 돌리는 중 {i}/{r}"))
         pass_sec.append(round(time.time() - t1, 1))
         for k in bad:
             again = load(k)
@@ -304,7 +357,7 @@ def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, 
     return out, {"chunks": m, "retried": len(bad) if temp > 0 else 0, "suspectChunks": n_suspect, "droppedChunks": n_dropped,
                  "failures": {f"{c[0][0] // 1000}s": f for c, f in zip(chunks, checks) if f},
                  "prompt": prompt, "fixedSegments": n_fixed, "passSec": pass_sec, "device": w.device(), "vad": {"engine": engine, **vad_stats},
-                 "whisper": w.timings}, used
+                 "whisper": w.timings, "parallel": par}, used
 
 
 def main():
@@ -314,17 +367,19 @@ def main():
     ap.add_argument("--settings", required=True)
     ap.add_argument("--words", action="store_true")
     ap.add_argument("--hints", help="단어장 힌트 파일(vocab.py)")
+    ap.add_argument("--run-options", help="실행 옵션 파일(parallel, 결과를 바꾸지 않음)")
     a = ap.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except (AttributeError, ValueError):
         pass
     settings = json.load(open(a.settings, encoding="utf-8"))
+    run = json.load(open(a.run_options, encoding="utf-8")) if a.run_options else {}
     out = Path(a.out)
     work = out.with_name(out.stem + ".chunks")
     work.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    segs, stats, used = transcribe(Path(a.wav).resolve(), work, settings, a.words, tools_dir(), V.load(a.hints) if a.hints else None)
+    segs, stats, used = transcribe(Path(a.wav).resolve(), work, settings, a.words, tools_dir(), V.load(a.hints) if a.hints else None, run)
     stats["seconds"] = round(time.time() - t0, 1)
     out.write_text(json.dumps({"segments": segs, "stats": stats, "vocabUsed": used}, ensure_ascii=False), encoding="utf-8")
     for f in work.iterdir(): f.unlink(missing_ok=True)
