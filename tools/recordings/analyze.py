@@ -63,6 +63,8 @@ API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrai
 이름 구간(2026-11-18 통화 이름 → 2026-11-19 플랫폼별, callnames.py 머리말): 실행 시작 때 디스코드 봇 .json의 사용자 id·전역 이름을 서버에 알리고(observe),
 GET /api/people/names를 받아 통화 상대(파일 이름의 연락처 이름)를 그날의 사람 이름으로 푼다(지정한 디스코드 계정 이름은 목소리 별칭으로).
   화자 이름·목소리 등록·요약 맥락·단어장 caller가 그 이름을 쓰고, 한 사람만 가리키는 이름은 목소리 별칭으로도 맞춘다(--dry-run은 저장 안 함). 못 읽으면 연락처 이름 그대로.
+사람 id(2026-11-19, persons.py 머리말): 시작 때 GET /api/persons/directory로 옛 이름(이름 바꾸기·합치기) → 지금 이름을 목소리 별칭으로 맞추고('나'는 빼고),
+  끝날 때 목소리 동명이인 신호(한 이름의 표본이 서로 다른 목소리로 갈림, voices.voice_checks)를 POST /api/persons/voice-checks로 한 번(통째로, 비어도). 옛 서버면 둘 다 건너뜀.
 단어장 힌트(2026-11-16, 계획 "3-① 단어장"): 매니페스트 hints인 파이프라인이고 설정 useHints가 꺼져 있지 않으면 묶음마다 POST /api/vocab/pick
   (통화면 caller = 통화 상대, max·maxChars = 설정 hintMax·hintChars)으로 힌트 파일을 만들어 --hints로 넘긴다. 서버를 못 읽으면 경고하고 이번 실행은 힌트 없이.
   올리기가 성공하면 파이프라인이 낸 vocabUsed(쓴 힌트·실제로 바꾼 고침 짝 id)로 POST /api/vocab/used(묶음 하나에 한 번). --plan은 고르지 않고, --dry-run은 고르기만.
@@ -1012,18 +1014,31 @@ def sweep_silent(a, call):
 
 def load_call_names(call, sync=True, save=True):
     """이름 구간(callnames.py 머리말)을 이 실행 동안 쓰게 받아 두고, 한 사람만 가리키는 이름은 목소리 별칭으로 맞춘다. 실패해도 전사는 그대로.
-    sync면 먼저 디스코드 봇 녹음 .json의 사용자 id·전역 이름을 서버에 알린다(observe_discord, 지난번 뒤 파일만. save가 아니면(dry-run) 세기만)"""
-    import callnames as CN
+    sync면 먼저 디스코드 봇 녹음 .json의 사용자 id·전역 이름을 서버에 알린다(observe_discord, 지난번 뒤 파일만. save가 아니면(dry-run) 세기만)
+    sync면 사람 표(persons.py, 2026-11-19)도 읽어 옛 이름(이름 바꾸기·합치기) → 지금 이름을 목소리 별칭으로 먼저 맞춘다(못 읽으면 건너뜀)"""
+    import callnames as CN, persons as PS
     if sync:
         try:
             CN.observe_discord(call, ROOT / "discord-bot", dry_run=not save)
         except Exception as e:
             print("디스코드 이름 관찰 건너뜀:", e)
     CN.load(call)
-    if not sync or not (len(CN.BOOK) or len(CN.DISCORD)): return
+    if not sync: return
+    PS.load(call)
+    names = len(CN.BOOK) or len(CN.DISCORD)
+    if PS.DIRECTORY is None and not names: return
     try:
         import speakers as sp
-        CN.sync_aliases(sp.V.Store(sp.VOICES), save=save)
+        store = sp.V.Store(sp.VOICES)
+    except Exception as e:
+        print("목소리 별칭 맞추기 건너뜀:", e); return
+    try:
+        PS.sync_aliases(store, save=save)
+    except Exception as e:
+        print("사람 표 별칭 맞추기 건너뜀:", e)
+    if not names: return
+    try:
+        CN.sync_aliases(store, save=save)
     except Exception as e:
         print("이름 구간 별칭 맞추기 건너뜀:", e)
 
@@ -1035,6 +1050,7 @@ def run(a):
     call = api()
     if not a.plan: import labels; labels.sync(call, dry_run=a.dry_run)   # 화자 라벨 반영·모르는 화자 묶음 올리기(labels.py 머리말, 실패해도 전사는 그대로)
     load_call_names(call, sync=not a.plan, save=not a.dry_run)
+    if not a.plan: import persons; persons.push_at_exit(call, dry_run=a.dry_run)   # 끝날 때 목소리 동명이인 신호 한 번(persons.py 머리말, 실패해도 그대로)
     get = lambda path: call("GET", path)
     rule = bundle_rule(get)
     now = epoch_ms(dt.datetime.now().astimezone())
