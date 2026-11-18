@@ -58,6 +58,8 @@ API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrai
   설정 버전·서버 기록에는 들어가지 않는다. python analyze.py --pipeline whisper-cpp@2 --run-option parallel=3 --source phone --pick X.m4a --dry-run
   자동 동시 실행(2026-11-18): parallel=auto(whisper-cpp@2·whisper-lite@1의 새 기본)면 파이프라인이 작업자 수를 스스로 조정한다. 진행 줄의 workers는
   step 이벤트에 그대로 싣고 eta.workers(지금·최소·최대·평균)에 모은다. 파일이 끝나면 stats.workers를 한 줄로 적는다(표준 오류).
+통화 이름 기록(2026-11-18, callnames.py 머리말): 실행 시작 때 GET /api/people/call-names를 받아 통화 상대(파일 이름의 연락처 이름)를 그날의 사람 이름으로 푼다.
+  화자 이름·목소리 등록·요약 맥락·단어장 caller가 그 이름을 쓰고, 한 사람만 가리키는 이름은 목소리 별칭으로도 맞춘다(--dry-run은 저장 안 함). 못 읽으면 연락처 이름 그대로.
 단어장 힌트(2026-11-16, 계획 "3-① 단어장"): 매니페스트 hints인 파이프라인이고 설정 useHints가 꺼져 있지 않으면 묶음마다 POST /api/vocab/pick
   (통화면 caller = 통화 상대, max·maxChars = 설정 hintMax·hintChars)으로 힌트 파일을 만들어 --hints로 넘긴다. 서버를 못 읽으면 경고하고 이번 실행은 힌트 없이.
   올리기가 성공하면 파이프라인이 낸 vocabUsed(쓴 힌트·실제로 바꾼 고침 짝 id)로 POST /api/vocab/used(묶음 하나에 한 번). --plan은 고르지 않고, --dry-run은 고르기만.
@@ -288,8 +290,10 @@ def pick_body(b: "B.Bundle", settings: dict) -> dict:
     """POST /api/vocab/pick 본문: 통화면 caller = 통화 상대, max·maxChars = 설정 hintMax·hintChars(없으면 서버 기본)"""
     body = {}
     if b.source == "call":
-        import speakers as sp
-        body["caller"] = sp.call_partner(b.items[0].path)
+        import callnames as CN   # 통화 이름 기록으로 그날의 사람 이름. 연락처 이름이 다르면 people에 연락처 이름도
+        body["caller"] = CN.partner(b.items[0].path)
+        raw = CN.raw_partner(b.items[0].path)
+        if CN.norm(raw) != CN.norm(body["caller"]): body["people"] = [raw]
     for key, field in (("max", "hintMax"), ("maxChars", "hintChars")):
         if settings.get(field) is not None: body[key] = int(settings[field])
     return body
@@ -367,7 +371,8 @@ def assign_speakers(source: str, f: Path, wav: Path, words: list, state: dict, r
     state["save"]가 False(dry-run)면 목소리 저장소를 바꾸지 않는다. sherpa-onnx나 모델이 없으면 화자 없이 묶기만 한다. → (구간들, 통화 상대 이름 또는 None)
     diar = 미리 해 둔 화자 분리 (turns, embs)(겹치기 실행의 화자 분리 갈래, 같은 wav의 Diarizer.diarize 결과). 없으면 여기서 한다"""
     import speakers as sp   # numpy만 쓴다. sherpa-onnx는 Diarizer가 부를 때
-    partner = sp.call_partner(f) if source == "call" else None
+    import callnames as CN
+    partner = CN.partner(f) if source == "call" else None   # 그날 그 연락처 이름의 사람(통화 이름 기록, 없으면 연락처 이름)
     if words and speaker_state(state):
         turns, embs = diar if diar is not None else state["d"].diarize(sp.load_wav(wav))   # 화자 수는 정하지 않는다(잘게 나눈 뒤 name_clusters가 합친다)
         no_me = source in sp.NO_ME_SOURCES   # 디스코드 출력: 내 목소리가 없다 → '나' 후보 없이 화자N만
@@ -690,7 +695,9 @@ def finish_bundle(b: "B.Bundle", wavs: list, parts: list, llm: "Llm | None", spk
     elif source == "laptop-mic":
         context = "노트북 마이크로 녹음한 소리(나와 방 안 다른 사람 목소리가 섞일 수 있음)"
     if partner:
-        context = f"전화 통화 녹음. 상대: {partner}. '나'는 녹음한 사용자 본인"
+        import callnames as CN
+        raw = CN.raw_partner(first.path)
+        context = f"전화 통화 녹음. 상대: {partner}" + (f"(연락처 이름 {raw})" if CN.norm(raw) != CN.norm(partner) else "") + ". '나'는 녹음한 사용자 본인"
     if len(b.items) > 1:
         context = (context + ". " if context else "") + f"녹음 파일 {len(b.items)}개를 시간순으로 이어 붙인 것"
     summary = None
@@ -992,12 +999,25 @@ def sweep_silent(a, call):
     print(f"말소리 없는 묶음 {n}개(파일 {n_files}개) " + ("— dry-run이라 옮기지 않음" if a.dry_run else f"휴지통으로 옮김({T.TRASH_DAYS}일 뒤 녹음 화면이 영구 삭제)"))
 
 
+def load_call_names(call, sync=True, save=True):
+    """통화 이름 기록(callnames.py 머리말)을 이 실행 동안 쓰게 받아 두고, 한 사람만 가리키는 이름은 목소리 별칭으로 맞춘다. 실패해도 전사는 그대로"""
+    import callnames as CN
+    CN.load(call)
+    if not sync or not len(CN.BOOK): return
+    try:
+        import speakers as sp
+        CN.sync_aliases(sp.V.Store(sp.VOICES), save=save)
+    except Exception as e:
+        print("통화 이름 별칭 맞추기 건너뜀:", e)
+
+
 def run(a):
     if a.sweep_silent:
         return sweep_silent(a, api())
     if not a.plan and not FFMPEG: sys.exit(f"없음: {A / 'ffmpeg'}/**/ffmpeg.exe")
     call = api()
     if not a.plan: import labels; labels.sync(call, dry_run=a.dry_run)   # 화자 라벨 반영·모르는 화자 묶음 올리기(labels.py 머리말, 실패해도 전사는 그대로)
+    load_call_names(call, sync=not a.plan, save=not a.dry_run)
     get = lambda path: call("GET", path)
     rule = bundle_rule(get)
     now = epoch_ms(dt.datetime.now().astimezone())

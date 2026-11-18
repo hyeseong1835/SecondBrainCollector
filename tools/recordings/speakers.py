@@ -218,6 +218,23 @@ def call_partner(path: Path) -> str:
     return m.group(1) if m else path.stem
 
 
+def _call_person(path: Path) -> str:
+    """통화 상대 = 그날 그 연락처 이름의 사람(callnames.py, 통화 이름 기록을 읽었을 때). 없으면 연락처 이름 그대로"""
+    import callnames as CN
+    return CN.partner(path)
+
+
+def _load_call_names(store=None):
+    """CLI(enroll-calls·test)에서 서버 통화 이름 기록을 읽고 목소리 별칭을 맞춘다. 서버를 못 읽으면 연락처 이름 그대로"""
+    import callnames as CN
+    try:
+        from analyze import api
+        CN.load(api())
+    except Exception as e:
+        print(f"통화 이름 기록을 못 읽음(이름 그대로 씀): {e}"); return
+    if store is not None: CN.sync_aliases(store)
+
+
 def _to_wav(ffmpeg, src: Path, dst: Path, max_sec: int | None = None):
     """max_sec를 주면 앞부분만(긴 통화를 통째로 읽으면 메모리가 모자랄 수 있다)"""
     cut = ["-t", str(max_sec)] if max_sec else []
@@ -291,11 +308,12 @@ def _rel(path: Path) -> str:
 def test(path: Path, num_speakers=None):
     from analyze import FFMPEG, started_from_name
     d, me, store = Diarizer(), Me.load(), V.Store(VOICES)
+    _load_call_names()   # 상대 이름만 푼다(저장소는 바꾸지 않음)
     with tempfile.TemporaryDirectory() as tmp:
         wav = Path(tmp) / "t.wav"
         _to_wav(FFMPEG, path, wav)
         turns, embs = d.diarize(load_wav(wav), num_speakers)
-    partner = call_partner(path) if path.parent.parent == CALL_ROOT else None
+    partner = _call_person(path) if path.parent.parent == CALL_ROOT else None
     source = "call" if partner else path.parent.parent.name
     names = name_clusters(embs, None if source in NO_ME_SOURCES else me, turns, partner)
     names, guessed, msg = apply_voices(store, source, _rel(path), started_from_name(path).isoformat(), turns, embs, names, me, partner, save=False)
@@ -315,13 +333,14 @@ def enroll_calls(max_calls=20, per_person=3, max_sec=300, min_sec=20, redo=False
     store, me = V.Store(VOICES), Me.load()
     if me is None:
         sys.exit("'나' 기준이 없다: python speakers.py enroll 먼저")
+    _load_call_names(store)
     done = {s.get("file") for s in store.samples if s["person"]}
     have = {}
     for s in store.samples:
         if s["person"]: have[s["person"]] = have.get(s["person"], 0) + 1
     chosen, per = [], {}
     for f in [Path(x) for x in files] if files else sorted(CALL_ROOT.rglob("*.m4a"), key=lambda p: p.stat().st_size, reverse=True):
-        who, rel = call_partner(f), _rel(f)
+        who, rel = _call_person(f), _rel(f)
         if V.is_number(who) or (rel in done and not redo): continue
         if per.get(who, 0) + (0 if redo else have.get(who, 0)) >= per_person: continue
         per[who] = per.get(who, 0) + 1
@@ -339,7 +358,7 @@ def enroll_calls(max_calls=20, per_person=3, max_sec=300, min_sec=20, redo=False
                 turns, embs = d.diarize(x)
             except Exception as e:   # 깨진 파일·메모리 부족은 그 통화만 건너뛴다
                 print(f"  [{i}/{len(chosen)}] {f.name[:40]}  건너뜀: {e!r}"); continue
-            partner = call_partner(f)
+            partner = _call_person(f)
             names = name_clusters(embs, me, turns, partner)
             _, _, msg = apply_voices(store, "call", _rel(f), started_from_name(f).isoformat(), turns, embs, names, me, partner)
             ok = not msg.startswith("목소리 등록 안 함")
