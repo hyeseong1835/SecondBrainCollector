@@ -11,7 +11,10 @@
 - 지금 파일: 예상 = a × 길이 + b. 파이프라인이 percent를 내면 경과로 늘인 값(경과 × (100 − p) / p)과 percent 비율로 섞는다. 화자 구분 중에는 null.
 
 진행 줄의 eta: {"remainingSec": 초|null, "fileRemainingSec": 초|null, "endsAt": ISO|null, "filesDone", "filesTotal", "audioDoneSec", "audioTotalSec",
-               "unknownFiles", "rate": a|null, "perFileSec": b|null, "samples": 쓴 표본 수, "historySamples": 그중 이 PC 기록}
+               "unknownFiles", "rate": a|null, "perFileSec": b|null, "samples": 쓴 표본 수, "historySamples": 그중 이 PC 기록,
+               "workers"?: {"now", "min", "max", "avg"}}
+- 작업자 수(2026-11-18): 파이프라인이 진행 줄에 workers(동시에 돌리는 whisper-cli 수, 자동 동시 실행)를 내면 workers(n)로 알린다.
+  이번 실행에서 본 지금·최소·최대·시간 가중 평균을 eta.workers로 낸다(한 번도 안 왔으면 칸 없음). 열쇠에는 실행 옵션 값(parallel=auto)이 들어가고 실제 수는 안 들어간다.
 """
 import datetime as dt, json, os, sys, time
 from pathlib import Path
@@ -104,6 +107,9 @@ class Eta:
         self.cur = []            # 지금 묶음의 끝난 파일 [(오디오 초, 걸린 초)]
         self.closed = set()      # 끝난(실패 포함) 묶음
         self.t_bundle = self.t_file = self.t_audio = None   # 묶음 시작·파일 시작·파일 전사 시작(wav 다음)
+        self.w_now = self.w_at = None   # 작업자 수(지금, 알린 시각)
+        self.w_min = self.w_max = None
+        self.w_area = self.w_span = 0.0  # 시간 가중 평균용(수 × 초, 초)
 
     # ---- 진행 알림 ----
     def start_bundle(self, i: int):
@@ -138,6 +144,21 @@ class Eta:
         self.closed.add(self.bundle)
         self.bundle, self.file, self.cur, self.t_bundle = None, None, [], None
 
+    def workers(self, n: int):
+        """파이프라인이 낸 지금 작업자 수"""
+        now = self.clock()
+        if self.w_now is not None and self.w_at is not None:
+            self.w_area += self.w_now * (now - self.w_at); self.w_span += now - self.w_at
+        self.w_now, self.w_at = n, now
+        self.w_min = n if self.w_min is None else min(self.w_min, n)
+        self.w_max = n if self.w_max is None else max(self.w_max, n)
+
+    def workers_info(self) -> dict | None:
+        if self.w_now is None: return None
+        extra = self.clock() - self.w_at
+        span, area = self.w_span + extra, self.w_area + self.w_now * extra
+        return {"now": self.w_now, "min": self.w_min, "max": self.w_max, "avg": round(area / span, 2) if span > 0 else float(self.w_now)}
+
     # ---- 셈 ----
     def model(self):
         """(a, b, 쓴 표본 수, 그중 기록 수). 표본이 모자라면 a·b가 None"""
@@ -156,6 +177,7 @@ class Eta:
         out = {"remainingSec": None, "fileRemainingSec": None, "endsAt": None, "filesDone": files_done, "filesTotal": files_total,
                "audioDoneSec": round(audio_done, 1), "audioTotalSec": round(audio_total, 1), "unknownFiles": self.unknown,
                "rate": None if a is None else round(a, 4), "perFileSec": None if b is None else round(b, 2), "samples": n, "historySamples": nh}
+        if (w := self.workers_info()) is not None: out["workers"] = w
         if a is None or (self.unknown and self.fill <= 0): return out   # 길이를 아는 파일이 하나도 없으면 셀 수 없다
         pred = lambda x: a * x + b
         rest = 0.0

@@ -47,6 +47,8 @@ API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrai
   미전사 = 어느 파이프라인의 결과도 없는 묶음(GET /api/recordings/analyzed). 다른 파이프라인으로 다시 돌리려면 --redo·--pick.
   실행 옵션(2026-11-17, pipelines.py 머리말): 결과를 바꾸지 않는 이 기기 값(예: parallel). analysis/settings.json의 runOptions → --run-option 키=값(여러 번).
   설정 버전·서버 기록에는 들어가지 않는다. python analyze.py --pipeline whisper-cpp@2 --run-option parallel=3 --source phone --pick X.m4a --dry-run
+  자동 동시 실행(2026-11-18): parallel=auto(whisper-cpp@2·whisper-lite@1의 새 기본)면 파이프라인이 작업자 수를 스스로 조정한다. 진행 줄의 workers는
+  step 이벤트에 그대로 싣고 eta.workers(지금·최소·최대·평균)에 모은다. 파일이 끝나면 stats.workers를 한 줄로 적는다(표준 오류).
 단어장 힌트(2026-11-16, 계획 "3-① 단어장"): 매니페스트 hints인 파이프라인이고 설정 useHints가 꺼져 있지 않으면 묶음마다 POST /api/vocab/pick
   (통화면 caller = 통화 상대, max·maxChars = 설정 hintMax·hintChars)으로 힌트 파일을 만들어 --hints로 넘긴다. 서버를 못 읽으면 경고하고 이번 실행은 힌트 없이.
   올리기가 성공하면 파이프라인이 낸 vocabUsed(쓴 힌트·실제로 바꾼 고침 짝 id)로 POST /api/vocab/used(묶음 하나에 한 번). --plan은 고르지 않고, --dry-run은 고르기만.
@@ -236,16 +238,36 @@ def server_settings_versions(p: P.Pipeline, warn) -> list:
 
 def transcribe(wav: Path, tmp: Path, words: bool = False, hints: Path | None = None, used: set | None = None, on_progress=None):
     """이번 실행의 파이프라인으로 wav → 구간. words=True면 단어마다 한 구간(화자 구분 assign_speakers가 화자별로 다시 묶는다).
-    hints = 단어장 힌트 파일, used = 쓴 단어장 id를 모을 집합, on_progress = 파이프라인이 낸 진행(percent·text)을 받는 함수"""
-    return P.run(CHOSEN.pipe, CHOSEN.settings, wav, tmp, words=words, tools=A, hints=hints, used=used, on_progress=on_progress,
-                 run_options=CHOSEN.run_options)
+    hints = 단어장 힌트 파일, used = 쓴 단어장 id를 모을 집합, on_progress = 파이프라인이 낸 진행(percent·text·workers)을 받는 함수"""
+    stats = {}
+    segs = P.run(CHOSEN.pipe, CHOSEN.settings, wav, tmp, words=words, tools=A, hints=hints, used=used, on_progress=on_progress,
+                 run_options=CHOSEN.run_options, stats=stats)
+    if (line := workers_line(stats.get("workers"))): print(f"  {wav.name}: {line}", file=sys.stderr, flush=True)
+    return segs
+
+
+def workers_line(w) -> str | None:
+    """파이프라인 stats.workers(autopar 풀 통계) → 사람이 읽는 한 줄. 자동이 아니고 1개뿐이면 None"""
+    if not isinstance(w, dict) or (w.get("mode") != "auto" and (w.get("max") or 1) <= 1): return None
+    try:
+        text = f"whisper-cli {'자동' if w.get('mode') == 'auto' else '고정'} {w['start']}→{w['final']}개(최소 {w['min']}·최대 {w['max']}·평균 {w['avg']})"
+        moves = [c for c in w.get("changes") or [] if c[2] != "시작"]
+        if moves: text += " · " + "; ".join(f"{c[0]:g}초 {c[1]}개 {c[2]}" for c in moves[-3:])
+        if w.get("recovered"): text += f" · 실패 되돌림 {w['recovered']}번"
+        return text
+    except (KeyError, TypeError, IndexError):
+        return None
 
 
 def transcribe_reporter(file: int, files: int):
     """파이프라인 진행을 --progress-json step 이벤트로 넘기는 함수(파일마다 새로, 초당 4번까지). --progress-json이 아니면 None"""
     if not PROGRESS: return None
     gate = P.Throttle()
-    return lambda ev: progress("step", stage="transcribe", file=file, files=files, **ev) if gate.ok() else None
+
+    def report(ev):
+        if ETA and ev.get("workers"): ETA.workers(ev["workers"])   # 거르기 전에(작업자 수 변화를 놓치지 않게)
+        if gate.ok(): progress("step", stage="transcribe", file=file, files=files, **ev)
+    return report
 
 
 VOCAB_OFF = False   # 단어장 고르기가 한 번 실패하면 이번 실행은 힌트 없이(묶음마다 경고하지 않게)

@@ -18,6 +18,9 @@
   이 기기의 값: 분석 설정 파일(asrmodels.settings_path(), %USERPROFILE%/.secondbrain/analysis/settings.json)의
   "runOptions": {"<이름>@<버전>" 또는 "<이름>": {키: 값}}. 이름@버전이 이름보다 앞서고, 매니페스트에 없는 키·형식이 틀린 값은 버린다(기본값).
   analyze.py --run-option 키=값이 그 위에 얹힌다(이번 실행만). 매니페스트에 runOptions가 있는 파이프라인에만 --run-options R.json(기본값 채움)을 더 넘긴다.
+  형식 "auto-count"(2026-11-18): "auto" 또는 1 이상의 정수(예: parallel = whisper-cli 동시 실행 수, auto = 파이프라인이 자원을 재 스스로 조정).
+  진행 줄에 "workers"(1 이상 정수, 지금 동시에 돌리는 프로세스 수)를 낼 수 있다(선택, run()이 percent·text와 함께 넘긴다).
+  run(stats={})를 주면 O.json의 "stats"(파이프라인 통계, 선택)를 담아 준다.
 """
 import json, os, re, shutil, subprocess, sys, threading, time
 from collections import deque
@@ -164,6 +167,9 @@ def run_defaults(p: Pipeline) -> dict:
 
 def fits(kind, value) -> bool:
     if kind == "number": return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value
+    if kind == "auto-count":   # "auto" 또는 1 이상의 정수(2.0도 정수로 본다)
+        if isinstance(value, str): return value.strip().lower() == "auto"
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value and value >= 1 and float(value).is_integer()
     if kind == "bool": return isinstance(value, bool)
     return isinstance(value, str)
 
@@ -233,8 +239,8 @@ PROGRESS_GAP = 0.25   # 초당 4번 넘게 넘기지 않는다
 
 
 def parse_progress(line: str) -> dict | None:
-    """파이프라인 표준 출력 한 줄 → {"percent"?: 0~100 실수, "text"?: 글}. 약속의 줄이 아니거나 JSON이 깨졌거나 객체가 아니거나 쓸 값이 없으면 None.
-    percent는 숫자(bool·NaN 아님)만 0~100으로 자르고, text는 문자열만(앞뒤 공백을 떼고, 비면 생략). 잘못된 한쪽은 버리고 다른 쪽만 쓴다."""
+    """파이프라인 표준 출력 한 줄 → {"percent"?: 0~100 실수, "text"?: 글, "workers"?: 1 이상 정수}. 약속의 줄이 아니거나 JSON이 깨졌거나 객체가 아니거나 쓸 값이 없으면 None.
+    percent는 숫자(bool·NaN 아님)만 0~100으로 자르고, text는 문자열만(앞뒤 공백을 떼고, 비면 생략), workers는 1 이상 정수만. 잘못된 칸은 버리고 나머지만 쓴다."""
     if not line.startswith(PROGRESS_PREFIX): return None
     try:
         raw = json.loads(line[len(PROGRESS_PREFIX):])
@@ -247,6 +253,8 @@ def parse_progress(line: str) -> dict | None:
         out["percent"] = min(100.0, max(0.0, float(pct)))
     text = raw.get("text")
     if isinstance(text, str) and text.strip(): out["text"] = text.strip()
+    w = raw.get("workers")
+    if isinstance(w, int) and not isinstance(w, bool) and w >= 1: out["workers"] = w
     return out or None
 
 
@@ -263,11 +271,12 @@ class Throttle:
 
 
 def run(p: Pipeline, settings: dict, wav: Path, tmp: Path, words: bool = False, tools: Path | None = None,
-        hints: Path | None = None, used: set | None = None, on_progress=None, run_options: dict | None = None) -> list:
+        hints: Path | None = None, used: set | None = None, on_progress=None, run_options: dict | None = None, stats: dict | None = None) -> list:
     """파이프라인 하나로 wav → 구간들 [{startMs, endMs, text, suspect?, original?}]. 실패하면 RuntimeError(stderr 끝)
     hints = 단어장 힌트 파일(매니페스트 hints인 파이프라인에만 넘긴다). used를 주면 O.json의 vocabUsed(쓴 단어장 id)를 더한다.
     on_progress = 파이프라인이 낸 @@progress 줄마다 부르는 함수(parse_progress의 딕셔너리, 거르지 않음).
-    run_options = 실행 옵션 값(run_values). 매니페스트에 runOptions가 있으면 기본값을 채워 --run-options로 넘긴다."""
+    run_options = 실행 옵션 값(run_values). 매니페스트에 runOptions가 있으면 기본값을 채워 --run-options로 넘긴다.
+    stats = 딕셔너리를 주면 O.json의 "stats"(객체일 때)를 담는다."""
     s_path, o_path = tmp / f"{wav.stem}.settings.json", tmp / f"{wav.stem}.segments.json"
     s_path.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
     extra = []
@@ -300,6 +309,7 @@ def run(p: Pipeline, settings: dict, wav: Path, tmp: Path, words: bool = False, 
         res = json.loads(o_path.read_text(encoding="utf-8-sig"))
         segs = res["segments"]
         if used is not None: used.update(int(x) for x in res.get("vocabUsed") or [])
+        if stats is not None and isinstance(res.get("stats"), dict): stats.update(res["stats"])
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise RuntimeError(f"{p.key} 결과를 읽지 못함({o_path.name}): {e}")
     out = []

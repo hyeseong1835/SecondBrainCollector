@@ -26,7 +26,7 @@ if a.hints:
     h = json.load(open(a.hints, encoding="utf-8"))
     segs[0]["original"], segs[0]["text"], used = segs[0]["text"], h["prompt"], h["ids"]
 run = json.load(open(a.run_options, encoding="utf-8")) if a.run_options else None
-open(a.out, "w", encoding="utf-8").write(json.dumps({"segments": segs, "wav": a.wav, "vocabUsed": used, "run": run}, ensure_ascii=False))
+open(a.out, "w", encoding="utf-8").write(json.dumps({"segments": segs, "wav": a.wav, "vocabUsed": used, "run": run, "stats": s.get("stats")}, ensure_ascii=False))
 '''
 
 
@@ -125,6 +125,40 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "일부러 실패"):
             P.run(p, P.effective(p, {"fail": True}), wav, work)
 
+    def test_run_stats_out(self):
+        """run(stats={})는 O.json의 stats(객체일 때)를 담는다(2026-11-18, 자동 동시 실행 기록)"""
+        p = P.load(make(self.repo))
+        wav = self.root / "p0.wav"; wav.write_bytes(b"")
+        work = self.root / "work"; work.mkdir()
+        st = {}
+        P.run(p, P.effective(p, {"stats": {"workers": {"mode": "auto", "max": 3}}}), wav, work, stats=st)
+        self.assertEqual(st, {"workers": {"mode": "auto", "max": 3}})
+        st = {}
+        P.run(p, P.effective(p, {"stats": [1]}), wav, work, stats=st)
+        self.assertEqual(st, {})
+
+    def test_workers_line_and_reporter(self):
+        import analyze, contextlib, io
+        self.assertIsNone(analyze.workers_line(None))
+        self.assertIsNone(analyze.workers_line({"mode": "fixed", "max": 1}))
+        w = {"mode": "auto", "start": 2, "final": 3, "min": 2, "max": 4, "avg": 3.1, "recovered": 1,
+             "changes": [[0.0, 2, "시작"], [15.2, 3, "늘려 봄"], [30.0, 4, "늘려 봄"], [45.0, 3, "4개와 같거나 느림"]]}
+        self.assertEqual(analyze.workers_line(w), "whisper-cli 자동 2→3개(최소 2·최대 4·평균 3.1) · 15.2초 3개 늘려 봄; 30초 4개 늘려 봄; 45초 3개 4개와 같거나 느림 · 실패 되돌림 1번")
+        self.assertEqual(analyze.workers_line({"mode": "fixed", "start": 2, "final": 2, "min": 2, "max": 2, "avg": 2.0, "changes": [[0.0, 2, "시작"]]}),
+                         "whisper-cli 고정 2→2개(최소 2·최대 2·평균 2.0)")
+        seen = []
+        old = (analyze.PROGRESS, analyze.ETA)
+        analyze.PROGRESS, analyze.ETA = True, type("E", (), {"workers": lambda s, n: seen.append(n), "snapshot": lambda s, *a, **k: {}})()
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rep = analyze.transcribe_reporter(1, 2)
+                rep({"percent": 10.0, "workers": 3}); rep({"percent": 11.0, "workers": 4})   # 둘째는 거르지만 작업자 수는 eta에
+            self.assertEqual(seen, [3, 4])
+            self.assertIn('"workers": 3', buf.getvalue())
+        finally:
+            analyze.PROGRESS, analyze.ETA = old
+
     def run_fake(self, **settings):
         """가짜 파이프라인을 돌려 (구간들, 받은 진행들)"""
         p = P.load(make(self.repo)) if not (self.repo / "fake@1").exists() else P.load(self.repo / "fake@1")
@@ -160,6 +194,13 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNone(P.parse_progress('@@progress {"percent": NaN}'))
         self.assertIsNone(P.parse_progress("@@progress"))
         self.assertEqual(P.parse_progress('@@progress {"percent": 5, "text": 7}'), {"percent": 5.0})   # 문자열이 아닌 text는 버리고 percent만
+        self.assertEqual(P.parse_progress('@@progress {"percent": 5, "workers": 3}'), {"percent": 5.0, "workers": 3})   # 작업자 수(2026-11-18)
+        for w in ("3", 0, 2.5, True):
+            self.assertEqual(P.parse_progress('@@progress {"percent": 5, "workers": %s}' % __import__("json").dumps(w)), {"percent": 5.0})
+
+    def test_fits_auto_count(self):
+        self.assertTrue(all(P.fits("auto-count", v) for v in ("auto", " AUTO ", 1, 4, 3.0)))
+        self.assertFalse(any(P.fits("auto-count", v) for v in ("많이", "3", 0, -1, 2.5, True, None, float("nan"))))
 
     def test_throttle(self):
         t = [0.0]
@@ -396,21 +437,25 @@ class ChooseTests(unittest.TestCase):
             c = self.choose(key)
             p, before = c.pipe, P.versions(c.pipe, self.settings)
             self.assertNotIn("parallel", c.settings)
-            self.assertEqual(P.run_defaults(p), {"parallel": 2})
+            D = {"parallel": "auto", "parallelMax": 0, "yield": True}   # 2026-11-18: 기본 자동
+            self.assertEqual(P.run_defaults(p), D)
             warns = []
             local = {key.split("@")[0]: {"parallel": 3}}
             c.run_options = self.A.run_options_for(p, [("parallel", 1), ("nope", 2), ("x", 1)], warns.append, local=local)
-            self.assertEqual(c.run_options, {"parallel": 1})
+            self.assertEqual(c.run_options, {**D, "parallel": 1})
             self.assertEqual(len(warns), 1)                                 # 없는 키 경고(형식은 맞음)
-            self.assertEqual(self.A.run_options_for(p, [], local=local), {"parallel": 3})
-            self.assertEqual(self.A.run_options_for(p, [("parallel", "많이")], warns.append, local={}), {"parallel": 2})
-            self.assertIn("형식", warns[-1])
+            self.assertEqual(self.A.run_options_for(p, [], local=local), {**D, "parallel": 3})
+            for bad in ("많이", 0, 2.5, True):
+                self.assertEqual(self.A.run_options_for(p, [("parallel", bad)], warns.append, local={}), D)
+                self.assertIn("형식", warns[-1])
+            self.assertEqual(self.A.run_options_for(p, [("parallel", "auto"), ("parallelMax", 3), ("yield", False)], local={"whisper-cpp": {"parallel": 2}}),
+                             {"parallel": "auto", "parallelMax": 3, "yield": False})
             self.assertEqual(c.ref(), {"name": p.name, "version": p.version, "settingsVersion": c.settings_version})
             self.assertIn("실행 옵션 parallel=1", c.label())
             self.assertEqual(self.choose(key).settings_version, c.settings_version)   # 다시 골라도 같은 설정 버전
             self.assertEqual(P.versions(p, self.settings), before)
         (self.root / "settings.json").write_text('{"runOptions": {"whisper-cpp@2": {"parallel": 5}}}', encoding="utf-8")
-        self.assertEqual(self.A.run_options_for(self.pipes["whisper-cpp@2"], []), {"parallel": 5})   # 이 기기 설정 파일(asrmodels.settings_path)
+        self.assertEqual(self.A.run_options_for(self.pipes["whisper-cpp@2"], []), {"parallel": 5, "parallelMax": 0, "yield": True})   # 이 기기 설정 파일(asrmodels.settings_path)
         self.assertEqual(self.A.run_options_for(self.pipes["fake@1"], [("parallel", 3)]), {})
 
     def test_other_pipeline_latest_or_defaults(self):
