@@ -3,4 +3,7 @@
     <Project Path="src/LifeLog.Collector.Windows/LifeLog.Collector.Windows.csproj" />
     <Project Path="src/LifeLog.Core/LifeLog.Core.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LifeLog.Core.Tests/LifeLog.Core.Tests.csproj" />
+  </Folder>
 </Solution>
