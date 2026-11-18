@@ -37,13 +37,15 @@
 녹음 위치: %USERPROFILE%/SecondBrainRecordings/<원천>/<날짜>/<이름>.m4a
   phone/           폰 녹음(pull-recordings.ps1이 가져옴). 기기 phone
   discord-output/  디스코드 출력 장치 녹음(데스크톱 수집기). 기기 laptop
-  discord-bot/     디스코드 봇 녹음(데스크톱 수집기, 사람별 파일 + 옆 .json에 화자). 기기 laptop. 세그먼트 speaker = 디스코드 표시 이름
+  discord-bot/     디스코드 봇 녹음(데스크톱 수집기, 사람별 파일 + 옆 .json에 화자). 기기 laptop. 세그먼트 speaker = 전역 이름, speakerId = discord:<id>, 세션 메타 *.session.json
   call/            삼성 통화 녹음(pull-call-recordings.ps1이 가져옴). 기기 phone, file은 "call/<날짜>/통화 <상대>_<YYMMDD>_<HHMMSS>.m4a"
   laptop-mic/      노트북 마이크 상시 녹음(데스크톱 수집기). 기기 laptop, file은 "laptop-mic/<날짜>/<이름>.m4a". 기숙사에선 룸메이트 목소리도 잡혀 화자 구분 대상
 화자 구분: speakers.py(sherpa-onnx). phone·call·laptop-mic·discord-output(2026-11-18, 내 목소리가 없어 '나'를 찾지 않고 화자N + 등록 목소리 이름만). '나' 기준은 python speakers.py enroll로 먼저 만든다(없으면 화자1·화자2…만)
   사람 목소리(2026-11-16, voices.py, 이 PC의 models/diar/voices/에만): 통화 전사 때 상대 목소리를 자동 등록(--dry-run이면 안 함),
   폰·노트북 마이크 녹음의 화자N은 등록된 목소리와 견줘 이름(덜 닮으면 구간에 speakerGuess: true → 서버 구간 speaker_guess). 목록·지우기: python speakers.py voices / forget
   디스코드 봇 녹음(2026-11-18): 전사 뒤 사람별 파일로 그 사람(디스코드 표시 이름, 별칭이 있으면 그 이름) 목소리를 등록(--dry-run이면 안 함)
+  디스코드 봇 메타데이터(2026-11-19, discordmeta.py): 구간 speakerId = "discord:<사용자 id>", speaker = 전역 이름(지정 이름은 서버가 id로 풂),
+  결과 본문 meta.discord = 세션(서버·채널·presence·이벤트, 묶음 시작 기준 ms)·참여자. 세션 파일이 없는 옛 녹음도 그대로 동작
 도구·모델: %LOCALAPPDATA%/SecondBrain/analysis (whisper.cpp Vulkan 빌드, ffmpeg, llama.cpp Vulkan, 모델들)
   전사 모델은 고를 수 있다(asrmodels.py, 기본 batisay-ko-turbo q8_0) + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
 API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrain/api.json, sbpaths.py)의 url·key(훅 키). 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 있으면 그것(시험 인스턴스)
@@ -80,6 +82,7 @@ import asrmodels as M
 import pipelines as P
 import eta as E
 import sbpaths
+import discordmeta as DM
 
 LOCAL = Path(os.environ["LOCALAPPDATA"])
 A = sbpaths.TOOLS   # 도구·모델(옮기지 않음)
@@ -122,24 +125,24 @@ def started_from_name(path: Path) -> dt.datetime:
 
 # ---- 디스코드 봇 녹음(discord-bot) ----
 # 수집기 DiscordBotSource가 사람별 파일 옆에 같은 이름의 .json을 둔다:
-#   { user_id, speaker(표시 이름), username, guild_id, guild, channel_id, channel, start, end, duration_ms, ... }
-# 파일 하나 = 한 사람. 묶음 안에서 사람(user_id)마다 트랙을 따로 이어 붙여 전사하고, 그 트랙 구간의 speaker를 그 사람의 표시 이름으로 채운다.
+#   { user_id, speaker, username, global_name, nick, bot, session, guild_id, guild, channel_id, channel, start, end, duration_ms, ... }
+# 파일 하나 = 한 사람. 묶음 안에서 사람(user_id)마다 트랙을 따로 이어 붙여 전사하고, 그 트랙 구간의 speaker를 그 사람의 기본 이름(전역 이름)으로,
+# speakerId를 "discord:<user_id>"로 채운다(2026-11-19, 서버가 id로 지정 이름을 푼다). 결과 본문 meta = 서버·채널·참여자 타임라인(discordmeta.py).
 
 def discord_bot_meta(f: Path):
     """봇 녹음 옆 .json. 없거나 깨졌으면 None."""
-    side = f.with_suffix(".json")
-    try:
-        return json.load(open(side, encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    return DM.load(f.with_suffix(".json"))
 
 
 def discord_bot_who(meta: dict | None):
-    """(트랙 키, 화자 이름). .json이 없으면 ('', None)"""
-    if not meta:
-        return "", None
-    speaker = meta.get("speaker") or meta.get("username") or meta.get("user_id")
-    return str(meta.get("user_id") or speaker or ""), speaker
+    """(트랙 키 = user_id, 기본 표시 이름). .json이 없으면 ('', None)"""
+    track, speaker, _ = DM.who(meta)
+    return track, speaker
+
+
+def discord_speaker_id(track: str):
+    """트랙 키(user_id)가 디스코드 id면 speakerId"""
+    return f"{DM.PLATFORM}:{track}" if track and track.isdigit() else None
 
 
 def discord_bot_context(metas: list) -> str:
@@ -669,7 +672,9 @@ def finish_bundle(b: "B.Bundle", wavs: list, parts: list, llm: "Llm | None", spk
         off = it.start - b.start
         for s in part:
             s["startMs"] += off; s["endMs"] += off
-            if source == "discord-bot": s["speaker"] = it.speaker
+            if source == "discord-bot":
+                s["speaker"] = it.speaker
+                if sid := discord_speaker_id(it.track): s["speakerId"] = sid
         segs += part
     segs.sort(key=lambda s: (s["startMs"], s["endMs"]))
     if words_mode:
@@ -688,9 +693,14 @@ def finish_bundle(b: "B.Bundle", wavs: list, parts: list, llm: "Llm | None", spk
         enroll_bot_voices(b, wavs, spk)
     transcript = " ".join(s["text"] for s in segs)
     speech = sum(s["endMs"] - s["startMs"] for s in segs)
-    context = None
+    context, meta = None, None
     if source == "discord-bot":
-        context = discord_bot_context([discord_bot_meta(it.path) for it in b.items])
+        metas = [discord_bot_meta(it.path) for it in b.items]
+        context = discord_bot_context(metas)
+        try:
+            meta = {"discord": DM.bundle_meta([(it.start, it.end, m) for it, m in zip(b.items, metas)], b.start, b.end, ROOT / "discord-bot")}
+        except Exception as e:   # 메타데이터가 깨져도 전사 결과는 올린다
+            print("  디스코드 메타데이터 건너뜀:", e)
     elif source == "discord-output":
         context = "디스코드 음성 통화에서 내 PC로 들린 소리(내 목소리는 없음)"
     elif source == "laptop-mic":
@@ -710,7 +720,7 @@ def finish_bundle(b: "B.Bundle", wavs: list, parts: list, llm: "Llm | None", spk
     files = [{"file": it.rel, "startedAt": iso(it.start), "endedAt": iso(it.end), "offsetMs": it.start - b.start} for it in b.items]
     return {"device": SOURCES[source], "file": first.rel, "source": source, "startedAt": iso(b.start), "endedAt": iso(b.end),
             "pipeline": CHOSEN.ref(), "llmModel": LLM_MODEL.stem if summary else None, "language": "ko",
-            "speechMs": speech, "transcript": transcript, "summary": summary, "segments": segs, "files": files}
+            "speechMs": speech, "transcript": transcript, "summary": summary, "segments": segs, "files": files, "meta": meta}
 
 
 def bundle_wav(b: "B.Bundle", wavs: list) -> Path:

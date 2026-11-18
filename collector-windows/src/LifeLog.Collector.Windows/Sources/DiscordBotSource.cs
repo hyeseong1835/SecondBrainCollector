@@ -20,7 +20,11 @@ namespace LifeLog.Collector.Windows.Sources;
 /// - 사람마다 파일: Opus(48kHz) → 16kHz 모노 → AAC 32kbps. 패킷이 5초 끊기면 그 사람의 파일을 닫고 다음 말부터 새 파일.
 ///   5초 안의 끊김은 무음으로 채워 파일 안 시각이 실제 시각과 맞는다. 30분이면 나눈다.
 /// - 위치: %USERPROFILE%\SecondBrainRecordings\discord-bot\yyyy-MM-dd\yyyyMMdd-HHmmss-&lt;사용자ID&gt;-xxxxxxxx.m4a
-///   옆에 같은 이름의 .json(사용자 ID·표시 이름·서버·채널·시작/끝 시각)을 둔다. 분석(tools/recordings/analyze.py)이 화자로 쓴다.
+///   옆에 같은 이름의 .json(사용자 ID·이름 셋·서버·채널·시작/끝 시각·세션 파일)을 둔다. 분석(tools/recordings/analyze.py)이 화자로 쓴다.
+/// - 세션 메타데이터(2026-11-19, <see cref="DiscordSessionLog"/>): 채널에 들어가 나올 때까지 yyyyMMdd-HHmmss-session-xxxxxxxx.session.json에
+///   서버·채널, 그 시각 채널에 있던 사람(presence), 들어옴·나감·음성 상태·이름 이벤트, 파일 ↔ 사용자 id를 남긴다(바뀌면 1초 안에 다시 씀).
+///   사람 식별은 사용자 id, 기본 표시 이름은 전역 이름(global_name → username → id). 서버 닉네임은 기록만.
+///   이름 바뀜은 음성 상태 갱신과 5분마다 채널 사람 이름 다시 묻기(op 8)로 안다. 모양: 설계 문서 "디스코드 봇 메타데이터.md".
 /// - 파일 하나가 끝날 때마다 { start, end, file, bytes, sha256, codec, duration_ms, mean_db, peak_db, user_id, speaker, guild_id, channel_id }를 낸다.
 ///   ID는 JS 숫자 범위를 넘으므로 문자열.
 /// </summary>
@@ -70,7 +74,10 @@ public sealed class DiscordBotSource : ISource
 
     private readonly Dictionary<ulong, Pipeline> _pipes = new();     // 사용자 → 디코더(채널에 있는 동안)
     private readonly Dictionary<ulong, Track> _tracks = new();       // 사용자 → 지금 쓰는 파일
-    private readonly Dictionary<ulong, (string display, string username)> _names = new();
+    private readonly Dictionary<ulong, DiscordUserInfo> _names = new();
+    private DiscordSessionLog? _session;                              // 지금 채널 세션(들어가 있을 때)
+    static readonly TimeSpan NameRefresh = TimeSpan.FromMinutes(5);
+    private DateTimeOffset _namesAsked;
     private readonly HashSet<ulong> _nameRequests = new();
 
     public DiscordBotSource(Action<string> log) { _log = log; }
@@ -140,6 +147,8 @@ public sealed class DiscordBotSource : ISource
                 CloseIdle(DateTimeOffset.Now);
                 if (++_tick % 2 == 0 && !_cts.IsCancellationRequested) WriteStatus();
                 if (_tick % 30 == 5 && !_cts.IsCancellationRequested) WriteCatalog();
+                FlushSession();
+                RefreshNames(DateTimeOffset.Now);
             }
             catch (Exception e) { _log($"[discord-bot] {e.Message}"); }
             try { await Task.Delay(1000, _cts.Token); } catch (OperationCanceledException) { }
@@ -228,10 +237,23 @@ public sealed class DiscordBotSource : ISource
 
     private ValueTask OnVoiceStateUpdate(VoiceState st)
     {
+        try { TrackVoice(st, DateTimeOffset.Now); } catch (Exception e) { _log($"[discord-bot] 세션 기록 실패: {e.Message}"); }
+        if (st.User is { } u) RememberName(u);
         if (st.UserId == _target) _ = FollowAsync(st.GuildId, st.ChannelId);
-        else if (st.User is { } u) RememberName(u);
         return default;
     }
+
+    /// <summary>세션 타임라인: 우리 채널에 들어옴·상태 바뀜, 우리 채널에서 나감(다른 채널로 옮김 포함).</summary>
+    private void TrackVoice(VoiceState st, DateTimeOffset now)
+    {
+        if (_session is not { } s || _guildId != st.GuildId) return;
+        var id = st.UserId.ToString();
+        if (st.ChannelId == _channelId) s.Join(now, id, Flags(st));
+        else if (s.Members.Contains(id)) s.Leave(now, id);
+    }
+
+    private static DiscordVoiceFlags Flags(VoiceState v) =>
+        new(v.IsSelfMuted, v.IsSelfDeafened, v.IsMuted, v.IsDeafened, v.SelfStreamExists == true, v.SelfVideoExists);
 
     /// <summary>대상 사용자를 따라간다. channel이 null이면(나감) 봇도 나간다.</summary>
     private async Task FollowAsync(ulong guildId, ulong? channelId)
@@ -265,6 +287,7 @@ public sealed class DiscordBotSource : ISource
             _voice = vc; _guildId = guildId; _channelId = channelId;
             InVoice = true;
             var (gName, chName) = Names(guildId, channelId.Value);
+            StartSession(c, guildId, channelId.Value, gName, chName);
             StatusText = $"녹음 중: {gName} / {chName}";
             _gName = gName; _chName = chName; Set("recording");
             _log($"[discord-bot] 참가: {gName} / {chName}");
@@ -273,11 +296,69 @@ public sealed class DiscordBotSource : ISource
         finally { _lock.Release(); }
     }
 
+    /// <summary>세션 시작: 봇이 들어갈 때 이미 채널에 있던 사람을 present로, 이름을 아는 사람은 이름도(모르면 op 8로 묻는다).</summary>
+    private void StartSession(GatewayClient c, ulong guildId, ulong channelId, string gName, string chName)
+    {
+        try
+        {
+            var now = DateTimeOffset.Now;
+            var me = c.Cache.User?.Id;
+            var s = new DiscordSessionLog(guildId.ToString(), gName, channelId.ToString(), chName, me?.ToString(), _target.ToString(), now);
+            _session = s;
+            if (c.Cache.Guilds.TryGetValue(guildId, out var guild))
+                foreach (var v in guild.VoiceStates.Values.Where(v => v.ChannelId == channelId && v.UserId != me))
+                {
+                    s.Present(now, v.UserId.ToString(), Flags(v));
+                    if (v.User is { } u) RememberName(u);
+                }
+            foreach (var id in s.Members)
+            {
+                var uid = ulong.Parse(id);
+                DiscordUserInfo? known;
+                lock (_names) known = _names.GetValueOrDefault(uid);
+                if (known is not null) s.Name(now, id, known); else EnsureName(uid);
+            }
+            _namesAsked = now;
+            FlushSession();
+        }
+        catch (Exception e) { _log($"[discord-bot] 세션 시작 기록 실패: {e.Message}"); }
+    }
+
+    /// <summary>세션 파일이 바뀌었으면 쓴다. 실패는 다음 차례에 다시.</summary>
+    private void FlushSession()
+    {
+        if (_session is not { Dirty: true } s) return;
+        WriteSession(s);
+    }
+
+    private void WriteSession(DiscordSessionLog s)
+    {
+        try { s.WriteTo(Path.Combine(RecordingPaths.Root, Folder)); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { _log($"[discord-bot] 세션 파일 쓰기 실패: {e.Message}"); }
+    }
+
+    /// <summary>5분마다 채널에 있는 사람 이름을 다시 묻는다(op 8 user_ids, 특권 인텐트 불필요). 답(GuildUserChunk)이 오면 RememberName이 바뀜을 남긴다.</summary>
+    private void RefreshNames(DateTimeOffset now)
+    {
+        if (_session is not { } s || _client is not { } c || _guildId is not ulong g || _channelId is not ulong ch || now - _namesAsked < NameRefresh) return;
+        _namesAsked = now;
+        var (gName, chName) = Names(g, ch);
+        s.Rename(gName, chName);
+        var ids = s.Members.Select(ulong.Parse).Take(100).ToList();
+        if (ids.Count == 0) return;
+        _ = Task.Run(async () =>
+        {
+            try { await c.RequestGuildUsersAsync(new GuildUsersRequestProperties(g).WithUserIds(ids)); }
+            catch (Exception e) { _log($"[discord-bot] 이름 다시 묻기 실패: {e.Message}"); }
+        });
+    }
+
     private async Task LeaveAsync()
     {
         var vc = _voice;
         var guild = _guildId;
-        _voice = null; _guildId = null; _channelId = null;
+        var session = _session;
+        _voice = null; _guildId = null; _channelId = null; _session = null;
         InVoice = false;
         if (vc is not null)
         {
@@ -296,6 +377,7 @@ public sealed class DiscordBotSource : ISource
         }
         var now = DateTimeOffset.Now;
         foreach (var t in closing) Finish(t, now);
+        if (session is not null) { session.Close(now); WriteSession(session); }
     }
 
     private ValueTask OnVoiceReceive(VoiceReceiveEventArgs args)
@@ -322,7 +404,7 @@ public sealed class DiscordBotSource : ISource
             if (t is null)
             {
                 if (_guildId is not ulong g || _channelId is not ulong ch) return;
-                try { t = _tracks[userId] = new Track(userId, g, ch, now.AddMilliseconds(-pcm.Length * 1000.0 / Rate)); }
+                try { t = _tracks[userId] = new Track(userId, g, ch, now.AddMilliseconds(-pcm.Length * 1000.0 / Rate), _session); }
                 catch (Exception e) { _log($"[discord-bot] 파일을 열지 못함: {e.Message}"); return; }
                 EnsureName(userId);
             }
@@ -347,13 +429,21 @@ public sealed class DiscordBotSource : ISource
         try
         {
             var (bytes, sha) = t.W.Finish();
-            (string display, string username) n;
-            lock (_names) n = _names.TryGetValue(t.UserId, out var hit) ? hit : (t.UserId.ToString(), "");
-            var (display, username) = n;
+            DiscordUserInfo? who;
+            lock (_names) who = _names.GetValueOrDefault(t.UserId);
+            var uid = t.UserId.ToString();
+            var display = DiscordUserInfo.DefaultName(who, uid);   // 기본 표시 이름 = 전역 이름(2026-11-19). 지정 이름은 서버가 id로 푼다
             var (gName, chName) = Names(t.GuildId, t.ChannelId);
+            if (t.Session is { } ss)
+            {
+                ss.File(t.Rel, uid, t.Start, end);
+                if (who is not null) ss.Name(end, uid, who);           // 파일로 처음 나온 사람도 이름을 남긴다
+                if (ss.End is not null) WriteSession(ss);              // 세션이 먼저 닫혔으면(늦게 끝난 파일) 여기서 다시 쓴다
+            }
             var meta = new Dictionary<string, object?>
             {
-                ["source"] = Folder, ["file"] = t.Rel, ["user_id"] = t.UserId.ToString(), ["speaker"] = display, ["username"] = username,
+                ["source"] = Folder, ["file"] = t.Rel, ["user_id"] = uid, ["speaker"] = display, ["username"] = who?.Username ?? "",
+                ["global_name"] = who?.GlobalName, ["nick"] = who?.Nick, ["bot"] = who?.Bot ?? false, ["session"] = t.Session?.Rel,
                 ["guild_id"] = t.GuildId.ToString(), ["guild"] = gName, ["channel_id"] = t.ChannelId.ToString(), ["channel"] = chName,
                 ["start"] = t.Start.ToString("o"), ["end"] = end.ToString("o"), ["duration_ms"] = t.W.DurationMs,
                 ["bytes"] = bytes, ["sha256"] = sha, ["codec"] = M4aWriter.Codec,
@@ -363,7 +453,7 @@ public sealed class DiscordBotSource : ISource
             {
                 ["start"] = t.Start.UtcDateTime, ["end"] = end.UtcDateTime, ["file"] = t.Rel, ["bytes"] = bytes, ["sha256"] = sha,
                 ["codec"] = M4aWriter.Codec, ["duration_ms"] = t.W.DurationMs, ["mean_db"] = t.MeanDb, ["peak_db"] = t.PeakDb,
-                ["user_id"] = t.UserId.ToString(), ["speaker"] = display, ["guild_id"] = t.GuildId.ToString(), ["channel_id"] = t.ChannelId.ToString(),
+                ["user_id"] = uid, ["speaker"] = display, ["guild_id"] = t.GuildId.ToString(), ["channel_id"] = t.ChannelId.ToString(),
             });
         }
         catch (Exception e) { t.W.Abort(); _log($"[discord-bot] 파일 마무리 실패 {t.Rel}: {e.Message}"); }
@@ -408,10 +498,13 @@ public sealed class DiscordBotSource : ISource
         return (guildId.ToString(), channelId.ToString());
     }
 
+    /// <summary>이름 셋을 기억하고, 지금 세션에 나온 사람이면 처음 앎·바뀜을 이벤트로 남긴다.</summary>
     private void RememberName(GuildUser u)
     {
-        var display = !string.IsNullOrEmpty(u.Nickname) ? u.Nickname : !string.IsNullOrEmpty(u.GlobalName) ? u.GlobalName : u.Username;
-        lock (_names) _names[u.Id] = (display!, u.Username);
+        var info = new DiscordUserInfo(u.Username, string.IsNullOrEmpty(u.GlobalName) ? null : u.GlobalName,
+            string.IsNullOrEmpty(u.Nickname) ? null : u.Nickname, u.IsBot);
+        lock (_names) _names[u.Id] = info;
+        if (u.GuildId == _guildId) _session?.Name(DateTimeOffset.Now, u.Id.ToString(), info);
     }
 
     /// <summary>봇이 들어오기 전부터 있던 사람은 음성 상태에 member가 없을 수 있어 op 8(user_ids 지정, 특권 인텐트 불필요)로 묻는다. HearingAid와 같다.</summary>
@@ -497,6 +590,7 @@ public sealed class DiscordBotSource : ISource
     private sealed class Track
     {
         public readonly ulong UserId, GuildId, ChannelId;
+        public readonly DiscordSessionLog? Session;
         public readonly DateTimeOffset Start;
         public DateTimeOffset Last;
         public readonly M4aWriter W;
@@ -505,9 +599,9 @@ public sealed class DiscordBotSource : ISource
         public double PeakDb { get; private set; } = -120;
         public double MeanDb => _chunks > 0 ? _sumDb / _chunks : -120;
 
-        public Track(ulong userId, ulong guildId, ulong channelId, DateTimeOffset start)
+        public Track(ulong userId, ulong guildId, ulong channelId, DateTimeOffset start, DiscordSessionLog? session)
         {
-            UserId = userId; GuildId = guildId; ChannelId = channelId; Start = Last = start;
+            UserId = userId; GuildId = guildId; ChannelId = channelId; Start = Last = start; Session = session;
             var (abs, rel) = RecordingPaths.New(Folder, start, userId.ToString());
             Rel = rel;
             W = new M4aWriter(abs);
