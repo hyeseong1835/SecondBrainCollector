@@ -58,7 +58,8 @@ API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrai
   설정 버전·서버 기록에는 들어가지 않는다. python analyze.py --pipeline whisper-cpp@2 --run-option parallel=3 --source phone --pick X.m4a --dry-run
   자동 동시 실행(2026-11-18): parallel=auto(whisper-cpp@2·whisper-lite@1의 새 기본)면 파이프라인이 작업자 수를 스스로 조정한다. 진행 줄의 workers는
   step 이벤트에 그대로 싣고 eta.workers(지금·최소·최대·평균)에 모은다. 파일이 끝나면 stats.workers를 한 줄로 적는다(표준 오류).
-통화 이름 기록(2026-11-18, callnames.py 머리말): 실행 시작 때 GET /api/people/call-names를 받아 통화 상대(파일 이름의 연락처 이름)를 그날의 사람 이름으로 푼다.
+이름 구간(2026-11-18 통화 이름 → 2026-11-19 플랫폼별, callnames.py 머리말): 실행 시작 때 디스코드 봇 .json의 사용자 id·전역 이름을 서버에 알리고(observe),
+GET /api/people/names를 받아 통화 상대(파일 이름의 연락처 이름)를 그날의 사람 이름으로 푼다(지정한 디스코드 계정 이름은 목소리 별칭으로).
   화자 이름·목소리 등록·요약 맥락·단어장 caller가 그 이름을 쓰고, 한 사람만 가리키는 이름은 목소리 별칭으로도 맞춘다(--dry-run은 저장 안 함). 못 읽으면 연락처 이름 그대로.
 단어장 힌트(2026-11-16, 계획 "3-① 단어장"): 매니페스트 hints인 파이프라인이고 설정 useHints가 꺼져 있지 않으면 묶음마다 POST /api/vocab/pick
   (통화면 caller = 통화 상대, max·maxChars = 설정 hintMax·hintChars)으로 힌트 파일을 만들어 --hints로 넘긴다. 서버를 못 읽으면 경고하고 이번 실행은 힌트 없이.
@@ -1000,15 +1001,21 @@ def sweep_silent(a, call):
 
 
 def load_call_names(call, sync=True, save=True):
-    """통화 이름 기록(callnames.py 머리말)을 이 실행 동안 쓰게 받아 두고, 한 사람만 가리키는 이름은 목소리 별칭으로 맞춘다. 실패해도 전사는 그대로"""
+    """이름 구간(callnames.py 머리말)을 이 실행 동안 쓰게 받아 두고, 한 사람만 가리키는 이름은 목소리 별칭으로 맞춘다. 실패해도 전사는 그대로.
+    sync면 먼저 디스코드 봇 녹음 .json의 사용자 id·전역 이름을 서버에 알린다(observe_discord, 지난번 뒤 파일만. save가 아니면(dry-run) 세기만)"""
     import callnames as CN
+    if sync:
+        try:
+            CN.observe_discord(call, ROOT / "discord-bot", dry_run=not save)
+        except Exception as e:
+            print("디스코드 이름 관찰 건너뜀:", e)
     CN.load(call)
-    if not sync or not len(CN.BOOK): return
+    if not sync or not (len(CN.BOOK) or len(CN.DISCORD)): return
     try:
         import speakers as sp
         CN.sync_aliases(sp.V.Store(sp.VOICES), save=save)
     except Exception as e:
-        print("통화 이름 별칭 맞추기 건너뜀:", e)
+        print("이름 구간 별칭 맞추기 건너뜀:", e)
 
 
 def run(a):
