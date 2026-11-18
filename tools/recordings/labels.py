@@ -20,7 +20,9 @@ dry-run이 아니면 sync가 atexit로 묶음 목록 올리기를 한 번 더 �
   segment   구간 하나: 임베딩을 다시 뽑는다(모르는 화자 표본은 화자N 전체라 구간 하나로 바꾸지 않는다).
   말이 voices.MIN_TURN_SEC(3초) 미만이면 표본을 만들지 않는다. 같은 녹음에서 같은 사람으로 라벨이 만든 옛 표본은 바꿔 넣는다.
   guess_wrong이고 이름이 없으면 평가 기록만.
+  별칭(voices.Store.canonical이 있으면, claude/discord-speakers): 라벨 이름·추정 이름을 canonical로 맞춰 표본·confirm_unknown에 쓴다. 없으면 그대로.
 평가 기록(guess_right·guess_wrong): models/diar/label-eval.jsonl 한 줄 = {at, labelId, kind, device, file, guessed, person, sec, sim, top}
+  guessed·person = canonical을 거친 이름, guessedRaw·personRaw = 라벨에 온 그대로, grade = voices.grade(원천)(있을 때: 전화/디스코드/대면).
   sim = 다시 뽑은 임베딩과 추정 사람 평균의 유사도(표본 넣기 전), top = 가장 닮은 사람 둘 [[이름, 유사도]]. 나중에 voices.SURE·GUESS 기준값을 맞출 때 쓴다.
 """
 import argparse, atexit, datetime as dt, json, os, subprocess, sys, tempfile
@@ -110,7 +112,19 @@ class AudioEmbedder:
 
 
 def _top(people: dict, emb) -> list:
-    return [[n, round(float(m @ emb), 3)] for n, (m, _) in sorted(people.items(), key=lambda kv: -float(kv[1][0] @ emb))[:2]]
+    """people 값은 (평균, 표본 수[, …]) — 앞 칸만 쓴다(갈래별 people(grade)는 3칸)"""
+    return [[n, round(float(v[0] @ emb), 3)] for n, v in sorted(people.items(), key=lambda kv: -float(kv[1][0] @ emb))[:2]]
+
+
+def canon(store, name):
+    """별칭을 따른 사람 이름(voices.Store.canonical이 있을 때, 2026-11-18 claude/discord-speakers). 없으면 그대로"""
+    return store.canonical(name) if name and hasattr(store, "canonical") else name
+
+
+def device_of(source, log=print) -> str:
+    if source in DEVICE_OF: return DEVICE_OF[source]
+    log(f"  모르는 원천 {source!r}: 기기 laptop으로 봄")
+    return "laptop"
 
 
 class Applier:
@@ -123,7 +137,8 @@ class Applier:
         t, kind = lb.get("target"), lb.get("kind")
         if t == "cluster": return self._cluster(lb)
         if t not in ("speaker", "segment"): return f"모르는 대상: {t}"
-        person = lb.get("speaker") if kind == "guess_right" else lb.get("person")
+        raw = lb.get("speaker") if kind == "guess_right" else lb.get("person")
+        person = canon(self.store, raw)
         guess = kind in ("guess_right", "guess_wrong")
         people = self.store.people() if guess else {}
         emb, sec, note = None, 0.0, None
@@ -134,11 +149,14 @@ class Applier:
         elif person or guess:
             emb, sec, note = self.embed(lb)
         if guess:
-            g = lb.get("speaker")
-            self.evals.append({"at": V.now_iso(), "labelId": lb["id"], "kind": kind, "device": lb.get("device"), "file": lb.get("file"),
-                               "guessed": g, "person": person, "sec": round(sec, 1),
-                               "sim": round(float(people[g][0] @ emb), 3) if emb is not None and g in people else None,
-                               "top": _top(people, emb) if emb is not None else []})
+            g0 = lb.get("speaker")
+            g = canon(self.store, g0)
+            e = {"at": V.now_iso(), "labelId": lb["id"], "kind": kind, "device": lb.get("device"), "file": lb.get("file"),
+                 "guessed": g, "guessedRaw": g0, "person": person, "personRaw": raw, "sec": round(sec, 1),
+                 "sim": round(float(people[g][0] @ emb), 3) if emb is not None and g in people else None,
+                 "top": _top(people, emb) if emb is not None else []}
+            if hasattr(V, "grade"): e["grade"] = V.grade(source_of(lb))
+            self.evals.append(e)
         if not person:
             return "평가 기록만(이름 없음)" if guess else "이름 없음: 건너뜀"
         if emb is None:
@@ -158,7 +176,7 @@ class Applier:
         return None
 
     def _cluster(self, lb: dict) -> str:
-        c, person = lb.get("cluster"), (lb.get("person") or "").strip()
+        c, person = lb.get("cluster"), canon(self.store, (lb.get("person") or "").strip())
         if c is None or not person: return "묶음·이름 없음: 건너뜀"
         now = {(s.get("file"), s.get("label")) for s in self.store.samples if s["person"] is None and s.get("cluster") == c}
         was = {(m.get("file"), m.get("label")) for m in lb.get("members") or []}
@@ -169,20 +187,20 @@ class Applier:
         return f"묶음 {c} 표본 {n}개 → {person}"
 
 
-def cluster_body(store: "V.Store") -> dict:
+def cluster_body(store: "V.Store", log=print) -> dict:
     """모르는 화자 묶음 목록(서버 PUT 본문). 임베딩은 넣지 않는다."""
     by = {s["id"]: s for s in store.samples}
     groups = []
     for g in V.unknown_groups(store):
         ms = [by[i] for i in g["samples"] if i in by]
         groups.append({"cluster": g["cluster"], "cohesion": g["cohesion"],
-                       "members": [{"device": DEVICE_OF.get(s.get("source"), "phone"), "file": s.get("file"), "label": s.get("label"),
+                       "members": [{"device": device_of(s.get("source"), log), "file": s.get("file"), "label": s.get("label"),
                                     "sec": s.get("sec") or 0, "source": s.get("source"), "at": s.get("at")} for s in ms]})
     return {"groups": groups}
 
 
 def push_clusters(call, store: "V.Store", dry_run=False, log=print):
-    body = cluster_body(store)
+    body = cluster_body(store, log)
     n = sum(len(g["members"]) for g in body["groups"])
     if dry_run:
         log(f"  (dry-run) 모르는 화자 묶음 {len(body['groups'])}개(표본 {n}개)를 올릴 것")
