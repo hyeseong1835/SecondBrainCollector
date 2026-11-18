@@ -110,6 +110,11 @@ powershell -ExecutionPolicy Bypass -File scripts\verify.ps1 -Restore   # 빌드 
   `net_key` = 와이파이 `wifi:<SSID>`, 유선 `lan:<게이트웨이 MAC>`(ARP 실패 시 `lan-ip:<IP>`). SSID는 WinRT `GetConnectedSsid`, 비면 프로필 이름(24H2 위치 권한 없을 때).
 - 설치 설정 `zones`(JSON 문자열, `x-ui: network-zones`): 네트워크별 거리 구간. 수집기는 읽지 않고 웹 설정 › 네트워크별 거리 구간이 쓰고, 웹·데스크톱 화면이 RSSI를 구간 이름으로 바꿔 보인다.
 - 시험: `network-test`(지금 값 한 줄), `node --test tools/plugin-tests/win-network.test.mjs`.
+- 랜선 위치 지문(2026-11-19, `win-network` 1.1.0): 소스 `lan_probe`(`LanProbeSource`, 선택 권한 `event:lan_probe`)가 이더넷일 때(붙은 뒤 20초·키가 바뀔 때·30분마다)
+  우리 API 서버까지 TTL 1..8 ICMP 경로(홉마다 1초)와 wlanapi 주변 AP 훑기(BSSID·SSID·dBm·채널, 센 것 40개)를 재 `probe` 시점 행으로 남긴다.
+  공유기를 들고 다녀 `lan:<게이트웨이 MAC>`가 어디서나 같기 때문. 서버가 공인 IP·이 행으로 위치 지문을 만들어 이름 붙인 위치와 맞춘다(Documents/기기.md "랜선 위치 지문").
+  시험: `lan-probe-test [서버 주소]`(이더넷이 아니어도 지금 한 번, DB 없이 찍기만), `LanProbeTests`(dotnet test collector-windows/tests/LifeLog.Core.Tests).
+  호스트는 이제 선택 권한(required false)의 소스가 없어도 플러그인을 건너뛰지 않는다. 옛 호스트는 `win-network` 1.1.0 전체를 건너뛰므로 앱을 먼저 새로 깐다.
 
 ## 오디오 장치 (2026-11-16)
 - 소스 `audio_device`(`AudioDeviceSource`), 플러그인 `win-audio-device`: Windows 오디오 입력·출력 장치(MMDevice)를 센서가 준 값 그대로 구간으로 남긴다. 기기 id·종류 판단은 넣지 않는다(Documents/기기.md 0절).
