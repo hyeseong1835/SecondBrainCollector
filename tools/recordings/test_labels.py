@@ -146,14 +146,6 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(L.local_path("call", "call/2026-11-14/통화 a.m4a"), L.ROOT / "call" / "2026-11-14/통화 a.m4a")
 
 
-class AliasStore(V.Store):
-    """별칭이 있는 저장소(claude/discord-speakers의 Store.canonical 흉내)"""
-    aliases = {"아버지": "아빠", "민수형": "민수"}
-
-    def canonical(self, name):
-        return self.aliases.get(name, name)
-
-
 class AliasTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -168,11 +160,12 @@ class AliasTests(unittest.TestCase):
         return L.sync(FakeApi(labels), log=lambda *_: None, store=store, embed=FakeEmbed(emb if emb is not None else vec()), at_exit=False)
 
     def test_canonical_used_for_samples_cluster_and_eval(self):
-        s = AliasStore(self.dir)
+        s = V.Store(self.dir)
+        s.aliases.update({"아버지": "아빠", "민수형": "민수"})   # 진짜 Store의 별칭 표(set_alias가 채우는 곳)
         dad = vec()
         for _ in range(2): s.add(dad, person="아빠", source="call", file="call/x.m4a")
         for f in ("a.m4a", "b.m4a"): s.add(vec(), person=None, source="phone", file=f, label="화자1", cluster=3, sec=9.0)
-        with unittest.mock.patch.object(V, "grade", lambda src: {"call": "전화", "discord-output": "디스코드"}.get(src, "대면"), create=True):
+        with unittest.mock.patch.object(V, "grade", lambda src: {"call": "전화", "discord-output": "디스코드"}.get(src, "대면"), ):
             self.sync(s, [lb(1, target="cluster", cluster=3, person="민수형", members=[{"device": "phone", "file": "a.m4a", "label": "화자1"}]),
                           lb(2, file="c.m4a", speaker="아버지", person=None, kind="guess_right")], emb=dad)
         got = V.Store(self.dir)
@@ -184,10 +177,12 @@ class AliasTests(unittest.TestCase):
         self.assertAlmostEqual(r["sim"], 1.0, places=3)
 
     def test_without_canonical_or_grade_names_stay(self):
+        # 별칭·갈래가 없는 옛 voices.py를 흉내: 진짜 voices.py(병합 뒤)에서 canonical·grade를 잠깐 뺀다
+        for owner, name in ((V.Store, "canonical"), (V, "grade")):
+            saved = owner.__dict__.get(name)
+            if saved is not None: delattr(owner, name); self.addCleanup(setattr, owner, name, saved)
         s = V.Store(self.dir)
         self.assertFalse(hasattr(s, "canonical"))
-        saved = V.__dict__.get("grade")   # 갈래가 있는 voices.py(병합 뒤)에서도 없는 경우를 본다
-        if saved is not None: delattr(V, "grade"); self.addCleanup(setattr, V, "grade", saved)
         self.sync(s, [lb(3, file="c.m4a", speaker="아버지", person=None, kind="guess_right")])
         r = json.loads(self.eval.read_text(encoding="utf-8"))
         self.assertEqual((r["guessed"], r["guessedRaw"], r["person"]), ("아버지", "아버지", "아버지"))
