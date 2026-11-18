@@ -434,7 +434,12 @@ public sealed class DiscordBotSource : ISource
             var uid = t.UserId.ToString();
             var display = DiscordUserInfo.DefaultName(who, uid);   // 기본 표시 이름 = 전역 이름(2026-11-19). 지정 이름은 서버가 id로 푼다
             var (gName, chName) = Names(t.GuildId, t.ChannelId);
-            t.Session?.File(t.Rel, uid, t.Start, end);
+            if (t.Session is { } ss)
+            {
+                ss.File(t.Rel, uid, t.Start, end);
+                if (who is not null) ss.Name(end, uid, who);           // 파일로 처음 나온 사람도 이름을 남긴다
+                if (ss.End is not null) WriteSession(ss);              // 세션이 먼저 닫혔으면(늦게 끝난 파일) 여기서 다시 쓴다
+            }
             var meta = new Dictionary<string, object?>
             {
                 ["source"] = Folder, ["file"] = t.Rel, ["user_id"] = uid, ["speaker"] = display, ["username"] = who?.Username ?? "",
