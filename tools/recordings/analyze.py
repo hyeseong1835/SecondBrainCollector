@@ -34,7 +34,7 @@
   laptop-mic/      노트북 마이크 상시 녹음(데스크톱 수집기). 기기 laptop, file은 "laptop-mic/<날짜>/<이름>.m4a". 기숙사에선 룸메이트 목소리도 잡혀 화자 구분 대상
 화자 구분: speakers.py(sherpa-onnx). phone·call·laptop-mic. '나' 기준은 python speakers.py enroll로 먼저 만든다(없으면 화자1·화자2…만)
   사람 목소리(2026-11-16, voices.py, 이 PC의 models/diar/voices/에만): 통화 전사 때 상대 목소리를 자동 등록(--dry-run이면 안 함),
-  폰·노트북 마이크 녹음의 화자N은 등록된 목소리와 견줘 이름(덜 닮으면 구간에 speakerGuess: true, 서버는 아직 이 필드를 저장하지 않음). 목록·지우기: python speakers.py voices / forget
+  폰·노트북 마이크 녹음의 화자N은 등록된 목소리와 견줘 이름(덜 닮으면 구간에 speakerGuess: true → 서버 구간 speaker_guess). 목록·지우기: python speakers.py voices / forget
 도구·모델: %LOCALAPPDATA%/SecondBrain/analysis (whisper.cpp Vulkan 빌드, ffmpeg, llama.cpp Vulkan, 모델들)
   전사 모델은 고를 수 있다(asrmodels.py, 기본 batisay-ko-turbo q8_0) + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
 API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrain/api.json, sbpaths.py)의 url·key(훅 키). 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 있으면 그것(시험 인스턴스)
@@ -680,6 +680,7 @@ def run(a):
         return sweep_silent(a, api())
     if not a.plan and not FFMPEG: sys.exit(f"없음: {A / 'ffmpeg'}/**/ffmpeg.exe")
     call = api()
+    if not a.plan: import labels; labels.sync(call, dry_run=a.dry_run)   # 화자 라벨 반영·모르는 화자 묶음 올리기(labels.py 머리말, 실패해도 전사는 그대로)
     get = lambda path: call("GET", path)
     rule = bundle_rule(get)
     now = epoch_ms(dt.datetime.now().astimezone())
