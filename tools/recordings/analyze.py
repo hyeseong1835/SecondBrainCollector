@@ -32,9 +32,10 @@
   discord-bot/     디스코드 봇 녹음(데스크톱 수집기, 사람별 파일 + 옆 .json에 화자). 기기 laptop. 세그먼트 speaker = 디스코드 표시 이름
   call/            삼성 통화 녹음(pull-call-recordings.ps1이 가져옴). 기기 phone, file은 "call/<날짜>/통화 <상대>_<YYMMDD>_<HHMMSS>.m4a"
   laptop-mic/      노트북 마이크 상시 녹음(데스크톱 수집기). 기기 laptop, file은 "laptop-mic/<날짜>/<이름>.m4a". 기숙사에선 룸메이트 목소리도 잡혀 화자 구분 대상
-화자 구분: speakers.py(sherpa-onnx). phone·call·laptop-mic. '나' 기준은 python speakers.py enroll로 먼저 만든다(없으면 화자1·화자2…만)
+화자 구분: speakers.py(sherpa-onnx). phone·call·laptop-mic·discord-output(2026-11-18, 내 목소리가 없어 '나'를 찾지 않고 화자N + 등록 목소리 이름만). '나' 기준은 python speakers.py enroll로 먼저 만든다(없으면 화자1·화자2…만)
   사람 목소리(2026-11-16, voices.py, 이 PC의 models/diar/voices/에만): 통화 전사 때 상대 목소리를 자동 등록(--dry-run이면 안 함),
   폰·노트북 마이크 녹음의 화자N은 등록된 목소리와 견줘 이름(덜 닮으면 구간에 speakerGuess: true, 서버는 아직 이 필드를 저장하지 않음). 목록·지우기: python speakers.py voices / forget
+  디스코드 봇 녹음(2026-11-18): 전사 뒤 사람별 파일로 그 사람(디스코드 표시 이름, 별칭이 있으면 그 이름) 목소리를 등록(--dry-run이면 안 함)
 도구·모델: %LOCALAPPDATA%/SecondBrain/analysis (whisper.cpp Vulkan 빌드, ffmpeg, llama.cpp Vulkan, 모델들)
   전사 모델은 고를 수 있다(asrmodels.py, 기본 batisay-ko-turbo q8_0) + Silero VAD(말소리 구간만), 요약 EXAONE 3.5 7.8B Q4_K_M(llama-server)
 API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrain/api.json, sbpaths.py)의 url·key(훅 키). 환경 변수 SECONDBRAIN_API·SECONDBRAIN_API_KEY가 있으면 그것(시험 인스턴스)
@@ -322,7 +323,7 @@ class Llm:
             self.proc.terminate()
 
 
-SPEAKER_SOURCES = ("phone", "call", "laptop-mic")   # 화자 구분(speakers.py)을 하는 원천. 전사를 단어 단위로 받는다
+SPEAKER_SOURCES = ("phone", "call", "laptop-mic", "discord-output")   # 화자 구분(speakers.py)을 하는 원천. 전사를 단어 단위로 받는다
 
 
 def assign_speakers(source: str, f: Path, wav: Path, words: list, state: dict, rel: str | None = None, at: str | None = None):
@@ -331,16 +332,11 @@ def assign_speakers(source: str, f: Path, wav: Path, words: list, state: dict, r
     state["save"]가 False(dry-run)면 목소리 저장소를 바꾸지 않는다. sherpa-onnx나 모델이 없으면 화자 없이 묶기만 한다. → (구간들, 통화 상대 이름 또는 None)"""
     import speakers as sp   # numpy만 쓴다. sherpa-onnx는 Diarizer가 부를 때
     partner = sp.call_partner(f) if source == "call" else None
-    if words and "d" not in state:
-        try:
-            state["d"], state["me"], state["voices"] = sp.Diarizer(), sp.Me.load(), sp.V.Store(sp.VOICES)
-            if state["me"] is None: print("  ('나' 기준 없음: python speakers.py enroll)")
-        except Exception as e:
-            print("  화자 구분 건너뜀:", e); state["d"] = None
-    if words and state.get("d"):
+    if words and speaker_state(state):
         turns, embs = state["d"].diarize(sp.load_wav(wav))   # 화자 수는 정하지 않는다(잘게 나눈 뒤 name_clusters가 합친다)
-        names, guessed = sp.name_clusters(embs, state["me"], turns, partner), set()
-        if state["me"] is not None:   # '나'를 못 가르면 상대 목소리도 못 고른다
+        no_me = source in sp.NO_ME_SOURCES   # 디스코드 출력: 내 목소리가 없다 → '나' 후보 없이 화자N만
+        names, guessed = sp.name_clusters(embs, None if no_me else state["me"], turns, partner), set()
+        if state["me"] is not None or no_me:   # '나'를 못 가르면 상대 목소리도 못 고른다
             try:
                 names, guessed, msg = sp.apply_voices(state["voices"], source, rel or f.name, at, turns, embs, names, state["me"], partner, save=state.get("save", True))
                 print("  " + msg)
@@ -349,6 +345,37 @@ def assign_speakers(source: str, f: Path, wav: Path, words: list, state: dict, r
         sp.label_segments(words, turns, names, guessed)
     segs = [s for s in sp.group_words(words) if not HALLUCINATIONS.match(s["text"])]
     return segs, partner
+
+
+def speaker_state(state: dict) -> bool:
+    """화자 분리기·'나'·목소리 저장소를 처음 쓸 때 읽는다. sherpa-onnx나 모델이 없으면 False"""
+    if "d" not in state:
+        import speakers as sp
+        try:
+            state["d"], state["me"], state["voices"] = sp.Diarizer(), sp.Me.load(), sp.V.Store(sp.VOICES)
+            if state["me"] is None: print("  ('나' 기준 없음: python speakers.py enroll)")
+        except Exception as e:
+            print("  화자 구분 건너뜀:", e); state["d"] = None
+    return bool(state.get("d"))
+
+
+def enroll_bot_voices(b: "B.Bundle", wavs: list, state: dict):
+    """디스코드 봇 묶음: 사람별 파일(wavs = b.items 순서의 16kHz wav)을 이어 그 사람 목소리를 등록(speakers.enroll_bot_tracks).
+    state["save"]가 False(dry-run)면 저장하지 않는다. 실패해도 전사 결과는 그대로 올린다."""
+    import speakers as sp, numpy as np
+    if not speaker_state(state): return
+    try:
+        tracks = []
+        for ix in B.by_track(b.items).values():
+            first, parts, n = b.items[ix[0]], [], 0
+            for i in ix:
+                if n >= sp.SR * sp.BOT_MAX_SEC: break
+                x = sp.load_wav(wavs[i]); parts.append(x); n += len(x)
+            tracks.append((first.speaker, first.rel, iso(first.start), np.concatenate(parts)))
+        n, msgs = sp.enroll_bot_tracks(state["voices"], state["d"], state["me"], tracks, save=state.get("save", True))
+        print(f"  목소리(봇) {n}명 등록: " + "; ".join(msgs))
+    except Exception as e:
+        print("  목소리(봇) 등록 건너뜀:", e)
 
 
 def labeled(segs: list) -> str:
@@ -497,6 +524,9 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
         progress("step", stage="speakers")
         whole = wavs[0] if len(wavs) == 1 else join_wavs(b, wavs, tmp / "bundle.wav")
         segs, partner = assign_speakers(source, first.path, whole, segs, spk, rel=first.rel, at=iso(b.start))
+    elif source == "discord-bot":
+        progress("step", stage="speakers")
+        enroll_bot_voices(b, wavs, spk)
     transcript = " ".join(s["text"] for s in segs)
     speech = sum(s["endMs"] - s["startMs"] for s in segs)
     context = None

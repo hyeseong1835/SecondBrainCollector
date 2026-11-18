@@ -234,5 +234,162 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(len(V.Store(Path(tmp) / "voices").samples), 1)
 
 
+class GradeTests(unittest.TestCase):
+    """음질 갈래(2026-11-18): 같은 갈래 평균 먼저, 갈래 표본이 없으면 전체 평균으로 추정까지만"""
+    def setUp(self):
+        self.store = V.Store(Path(tempfile.gettempdir()) / "never-saved")
+        # 청아: 전화 목소리와 디스코드 목소리가 꽤 다르다(같은 사람, 다른 음질)
+        self.a_call, self.a_disc, self.b_call = voice(), voice(), voice()
+        for i in range(3): self.store.add(near(self.a_call, 0.95), person="청아", source="call", file=f"call/a{i}")
+        for i in range(3): self.store.add(near(self.a_disc, 0.95), person="청아", source="discord-bot", file=f"bot/a{i}")
+        for i in range(3): self.store.add(near(self.b_call, 0.95), person="아빠", source="call", file=f"call/b{i}")
+
+    def test_grade(self):
+        self.assertEqual([V.grade(x) for x in ("call", "discord-bot", "discord-output", "phone", "laptop-mic", None, "etc")],
+                         ["call", "discord", "discord", "face", "face", None, "etc"])
+
+    def test_people_by_grade(self):
+        ppl = self.store.people(grade="discord")
+        self.assertEqual((ppl["청아"][1], ppl["청아"][2]), (3, False))   # 디스코드 표본 3개의 평균
+        self.assertGreater(float(ppl["청아"][0] @ self.a_disc), 0.9)
+        self.assertEqual((ppl["아빠"][1], ppl["아빠"][2]), (3, True))    # 디스코드 표본이 없어 전체 평균
+        self.assertEqual(len(self.store.people()["청아"]), 2)             # grade 없이 부르면 예전 모양 그대로
+        self.assertEqual(len(self.store.rows("청아", "discord")), 3)
+
+    def test_match_prefers_same_grade(self):
+        e = near(self.a_disc, 0.8)
+        m = V.match(self.store.people(grade="discord"), e)
+        self.assertEqual((m[0], m[2]), ("청아", False))   # 같은 갈래 평균이면 확정
+        m = V.match(self.store.people(), e)   # 전체 평균(전화+디스코드 섞임)이면 덜 닮아 추정
+        self.assertTrue(m is None or m[2])
+        # 그 갈래 표본이 없는 사람은 아무리 닮아도 추정까지만
+        self.assertEqual(V.match(self.store.people(grade="discord"), near(self.b_call, 0.9)), ("아빠", unittest.mock.ANY, True))
+
+    def test_apply_voices_uses_recording_grade(self):
+        embs = {1: near(self.a_disc, 0.8)}
+        names, guessed, msg = sp.apply_voices(self.store, "discord-output", "discord-output/x.m4a", None, turns_of({1: 20}), embs, {1: "화자1"}, None, save=False)
+        self.assertEqual((names[1], guessed), ("청아", set()))
+        names, guessed, _ = sp.apply_voices(self.store, "laptop-mic", "laptop-mic/x.m4a", None, turns_of({1: 20}), embs, {1: "화자1"}, None, save=False)
+        self.assertNotEqual((names[1], guessed), ("청아", set()))   # 대면 표본이 없으니 확정 이름은 안 붙는다
+
+
+class AliasTests(unittest.TestCase):
+    def test_alias_moves_samples_and_persists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            st = V.Store(Path(tmp) / "voices")
+            a = voice()
+            st.add(near(a, 0.9), person="CK 김청아 누나", source="call", file="call/1")
+            st.add(near(a, 0.9), person="청아", source="discord-bot", file="bot/1", display="청아")
+            self.assertEqual(st.set_alias("청아", "CK 김청아 누나"), 1)
+            self.assertEqual(st.people()["CK 김청아 누나"][1], 2)
+            self.assertEqual(st.samples[1]["display"], "청아")
+            self.assertEqual(st.canonical("청아"), "CK 김청아 누나")
+            self.assertEqual(st.canonical("아빠"), "아빠")
+            # 사람 이름 쪽을 다시 별칭으로 돌리면 앞 별칭도 따라간다
+            st.set_alias("CK 김청아 누나", "김청아")
+            self.assertEqual(st.aliases, {"청아": "김청아", "CK 김청아 누나": "김청아"})
+            with self.assertRaises(ValueError): st.set_alias("김청아", "청아")   # 돌고 도는 별칭
+            st.save()
+            r = V.Store(Path(tmp) / "voices")
+            self.assertEqual(r.aliases["청아"], "김청아")
+            self.assertTrue(r.remove_alias("청아")); self.assertFalse(r.remove_alias("청아"))
+            self.assertEqual(r.people()["김청아"][1], 2)   # 옮긴 표본은 그대로
+
+    def test_call_enroll_follows_alias(self):
+        st, me, mom = V.Store(Path(tempfile.gettempdir()) / "never-saved"), voice(), voice()
+        st.aliases["엄마폰"] = "엄마"
+        s, msg = V.enroll_call(st, "엄마폰", "call/1", None, {0: near(me, 0.9), 1: near(mom, 0.9)}, turns_of({0: 30, 1: 30}), {0: "나", 1: "엄마폰"})
+        self.assertEqual(s["person"], "엄마", msg)
+
+
+class BotTests(unittest.TestCase):
+    """디스코드 봇 녹음(사람별 파일)으로 목소리 등록"""
+    def setUp(self):
+        self.store = V.Store(Path(tempfile.gettempdir()) / "never-saved")
+        self.friend, self.me = voice(), voice()
+
+    def enroll(self, embs, durs, display="민수", file="2026-11-18/a.m4a", me=None):
+        return V.enroll_bot(self.store, display, file, "2026-11-18T10:00:00+09:00", embs, turns_of(durs), me)
+
+    def test_enroll_and_rules(self):
+        e1, e2 = near(self.friend, 0.9), near(self.friend, 0.9)
+        s, msg = self.enroll({0: e1, 1: e2}, {0: 20, 1: 10})   # 잘게 나뉜 한 사람은 합쳐 등록
+        self.assertIsNotNone(s, msg)
+        self.assertEqual((s["person"], s["source"], s["display"], s["sec"]), ("민수", "discord-bot", "민수", 30.0))
+        # 다시 전사하면 바꿔 넣는다
+        self.enroll({0: near(self.friend, 0.9)}, {0: 20})
+        self.assertEqual(len(self.store.rows("민수")), 1)
+        # 말이 짧으면 안 함
+        s, msg = self.enroll({0: self.friend}, {0: 8}, file="b.m4a"); self.assertIsNone(s); self.assertIn("짧음", msg)
+        # 한 사람 파일에 다른 목소리도 길게(한 마이크에 둘)
+        s, msg = self.enroll({0: near(self.friend, 0.9), 1: voice()}, {0: 20, 1: 15}, file="c.m4a"); self.assertIsNone(s); self.assertIn("여럿", msg)
+        # 표시 이름 없음
+        self.assertIsNone(self.enroll({0: self.friend}, {0: 30}, display=None)[0])
+
+    def test_me_and_alias(self):
+        me = sp.Me(self.me)
+        s, msg = self.enroll({0: near(self.me, 0.9)}, {0: 30}, display="hyes", me=me)
+        self.assertIsNone(s); self.assertIn("'나'", msg)
+        self.store.aliases["hyes"] = V.ME_NAME   # 사람이 '나'로 이어 두면 '나' 기준과 덜 닮아도 안 함
+        self.assertIsNone(self.enroll({0: voice()}, {0: 30}, display="hyes")[0])
+        self.store.aliases["민수짱"] = "김민수"
+        s, _ = self.enroll({0: self.friend}, {0: 30}, display="민수짱", me=me)
+        self.assertEqual((s["person"], s["display"]), ("김민수", "민수짱"))
+
+    def test_consistency_same_grade_only(self):
+        # 전화 표본(다른 음질)이 많아도 디스코드 표본은 막지 않는다
+        for i in range(V.CHECK_AFTER): self.store.add(voice(), person="민수", source="call", file=f"call/{i}")
+        for i in range(V.CHECK_AFTER):
+            s, msg = self.enroll({0: near(self.friend, 0.8)}, {0: 30}, file=f"bot/{i}")
+            self.assertIsNotNone(s, msg)
+        # 디스코드 표본이 쌓인 뒤 다른 사람 목소리는 막는다
+        s, msg = self.enroll({0: voice()}, {0: 30}, file="bot/x")
+        self.assertIsNone(s); self.assertIn("기존 목소리와 다름", msg)
+
+    def test_enroll_bot_tracks(self):
+        class FakeDiar:
+            def __init__(s, out): s.out = out
+            def diarize(s, x): return s.out.pop(0)
+        friend2 = voice()
+        with tempfile.TemporaryDirectory() as tmp:
+            st = V.Store(Path(tmp) / "voices")
+            d = FakeDiar([(turns_of({0: 30}), {0: near(self.friend, 0.9)}), (turns_of({0: 4}), {0: friend2}), (turns_of({0: 30}), {0: near(self.me, 0.9)})])
+            tracks = [("민수", "bot/a", None, np.zeros(10)), ("지은", "bot/b", None, np.zeros(10)), ("hyes", "bot/c", None, np.zeros(10))]
+            n, msgs = sp.enroll_bot_tracks(st, d, sp.Me(self.me), tracks, save=False)
+            self.assertEqual(n, 1)
+            self.assertTrue(msgs[0].startswith("민수 등록")); self.assertIn("짧음", msgs[1]); self.assertIn("'나'", msgs[2])
+            self.assertFalse((Path(tmp) / "voices").exists())   # dry-run
+            d.out = [(turns_of({0: 30}), {0: near(self.friend, 0.9)})]
+            sp.enroll_bot_tracks(st, d, None, tracks[:1])
+            self.assertEqual(V.Store(Path(tmp) / "voices").samples[-1]["display"], "민수")
+
+
+class DiscordOutputTests(unittest.TestCase):
+    """discord-output은 내 목소리가 없다: '나' 후보 없이 화자N + 등록 목소리 이름만(analyze.assign_speakers)"""
+    def run_assign(self, source):
+        import analyze as A
+        me, friend = voice(), voice()
+        store = V.Store(Path(tempfile.gettempdir()) / "never-saved")
+        for i in range(3): store.add(near(friend, 0.95), person="민수", source="discord-bot", file=f"bot/{i}")
+        turns = turns_of({0: 20, 1: 20})
+        embs = {0: near(me, 0.85), 1: near(friend, 0.8)}   # 묶음 0은 '나' 기준과 아주 닮았다(내 목소리 같은 남의 목소리·되울림)
+        class FakeDiar:
+            def diarize(s, x): return turns, embs
+        state = {"d": FakeDiar(), "me": sp.Me(me), "voices": store, "save": False}
+        words = [{"startMs": 1000, "endMs": 2000, "text": "안녕"}, {"startMs": 21000, "endMs": 22000, "text": "반가워"}]
+        with unittest.mock.patch.object(sp, "load_wav", lambda p: np.zeros(16000, np.float32)):
+            segs, partner = A.assign_speakers(source, Path(f"{source}/2026-11-18/20261118-100000.m4a"), Path("x.wav"), words, state,
+                                              rel=f"{source}/x.m4a", at=None)
+        return [(s["speaker"], s.get("speakerGuess", False)) for s in segs]
+
+    def test_no_me_in_discord_output(self):
+        import analyze as A
+        self.assertIn("discord-output", A.SPEAKER_SOURCES)
+        self.assertEqual(self.run_assign("discord-output"), [("화자1", False), ("민수", False)])
+        out = self.run_assign("laptop-mic")
+        self.assertEqual(out[0], ("나", False))   # 대면 녹음은 그대로 '나'를 찾는다
+        self.assertEqual(out[1], ("민수", True))   # 대면 표본이 없어 디스코드 평균으로 추정
+
+
 if __name__ == "__main__":
     unittest.main()
