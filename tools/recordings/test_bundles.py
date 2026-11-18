@@ -2,7 +2,7 @@
 import sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
-from bundles import Item, make_bundles, make_calls, in_progress
+from bundles import Item, make_bundles, make_calls, in_progress, by_track
 
 RULE = {"gapSec": 60, "maxSec": 1800, "singleSources": ["call"], "callSources": ["discord-output", "laptop-mic"]}
 S = 1000
@@ -65,6 +65,14 @@ class BundleTests(unittest.TestCase):
         bundles = make_bundles(items, RULE)
         self.assertGreater(len(bundles), 2)
         self.assertEqual([len(c) for c in make_calls(bundles, RULE)], [len(bundles)])
+
+
+    def test_by_track(self):
+        # 봇 묶음: 사람(track)별 파일 번호를 시작 순으로, 화자를 모르는(.json 없는) 파일은 뺀다
+        items = [Item("discord-bot", "b2", 30 * S, 40 * S, track="u1", speaker="민수"), Item("discord-bot", "a1", 0, 10 * S, track="u2", speaker="지은"),
+                 Item("discord-bot", "b1", 5 * S, 9 * S, track="u1", speaker="민수"), Item("discord-bot", "x", 6 * S, 8 * S)]
+        self.assertEqual(by_track(items), {"u2": [1], "u1": [2, 0]})
+        self.assertEqual(list(by_track(items)), ["u2", "u1"])   # 먼저 말한 사람부터
 
 
 if __name__ == "__main__":

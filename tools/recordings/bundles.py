@@ -97,3 +97,13 @@ def make_calls(bundles, rule=DEFAULT_RULE):
             cur, cur_end = [b], b.end
     if cur: chains.append(cur)
     return [c for c in chains if len({b.source for b in c}) > 1]
+
+
+def by_track(items) -> dict:
+    """디스코드 봇 묶음의 파일을 사람(track = user_id)별로 → {track: [items 안 번호…]}(시작 순). 화자를 모르는(.json 없는) 파일은 뺀다.
+    (2026-11-18) 사람별 파일을 이어 그 사람 목소리를 등록할 때 쓴다(speakers.enroll_bot_tracks)."""
+    out = {}
+    for i in sorted(range(len(items)), key=lambda i: (items[i].start, items[i].end)):
+        it = items[i]
+        if it.track and it.speaker: out.setdefault(it.track, []).append(i)
+    return out
