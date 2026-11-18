@@ -170,57 +170,86 @@ class EtaTests(unittest.TestCase):
         self.assertEqual([E.human(x) for x in (None, 4.6, 125, 3600 + 300)], ["계산 중", "5초", "2분", "1시간 5분"])
 
 
+class FlowTests(unittest.TestCase):
+    """겹치기 실행(Flow): 무리가 다 끝나야 표본, 앞 무리가 끝난 뒤 걸린 시간을 오디오 비율로"""
+    def test_group_samples_and_active_group(self):
+        c = Clock()
+        e = E.Flow([[60.0, 20.0], [20.0], [100.0]], None, groups=[[0, 1], [2]], history=[(60, 30)] * 3, clock=c, save=False)
+        snap = e.snapshot()
+        self.assertAlmostEqual(snap["remainingSec"], 100)   # a = 0.5, b = 0 → 200초 × 0.5
+        e.start_group([0, 1]); c.tick(20)
+        s = e.snapshot(50.0, file=1, files=1)
+        self.assertAlmostEqual(s["fileRemainingSec"], 0.5 * 20 + 0.5 * 25)   # 경과로 늘인 20초와 예상 50×(1−0.5)를 반씩
+        self.assertAlmostEqual(s["remainingSec"], s["fileRemainingSec"] + 50)
+        e.end_transcribe(); c.tick(5)
+        e.finish(0, ok=True)
+        self.assertEqual(len(e.run), 0)   # 무리의 묶음 1이 아직
+        self.assertEqual(e.snapshot()["filesDone"], 2)
+        e.finish(1, ok=False)   # 실패한 묶음 파일은 표본에서 뺀다
+        self.assertEqual(e.run, [(60.0, 25 * 60 / 80), (20.0, 25 * 20 / 80)])
+        e.start_group([2]); c.tick(10); e.end_transcribe(); e.finish(2)
+        self.assertEqual(e.run[-1], (100.0, 10.0))
+        self.assertEqual(e.snapshot()["remainingSec"], 0)
+
+    def test_sequential_files_progress(self):
+        """여러 입력이 아닌 파이프라인: 무리 안 파일 k/n과 파일 안 percent로 무리 진행"""
+        c = Clock()
+        e = E.Flow([[60.0, 60.0]], None, history=[(60, 30)] * 3, clock=c, save=False)
+        e.start_group([0]); c.tick(30)
+        s = e.snapshot(0.0001, file=2, files=2)   # 파일 1 끝, 파일 2 막 시작 → 진행 약 절반
+        self.assertAlmostEqual(s["fileRemainingSec"], 30, delta=0.1)
+
+
 class AnalyzeEtaTests(unittest.TestCase):
-    """analyze.run_jobs가 진행 줄에 eta를 붙이는 모양(전사·서버 없이)"""
+    """analyze.run_jobs(겹치기 실행)가 진행 줄에 eta를 붙이는 모양(전사·서버 없이, 가짜 여러 입력 파이프라인)"""
     def test_progress_lines_carry_eta(self):
         import analyze as A, bundles as B, pipelines as P
         clock = Clock()
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "eta-history.json"
-            E.save_history(E.key({"name": "fake", "version": "1", "settingsVersion": 1}, {"parallel": 2}), [(60, 30)] * 3, path)
+            key = E.key({"name": "fake", "version": "1", "settingsVersion": 1}, {"parallel": 2, "flow": "multi"})
+            E.save_history(key, [(60, 30)] * 3, path)
             T0 = 1_800_000_000_000
             mk = lambda start, ms: B.Item("phone", f"{start}.m4a", T0 + start, T0 + start + ms, Path(d) / f"{start}.m4a")
             jobs = [B.Bundle("phone", [mk(0, 60_000), mk(70_000, 60_000)]), B.Bundle("phone", [mk(900_000, 1)]), B.Bundle("phone", [mk(990_000, 60_000)])]
-            pipe = P.Pipeline("fake", "1", "", False, Path(d) / "run.py", {}, Path(d))
+            pipe = P.Pipeline("fake", "1", "", False, Path(d) / "run.py", {}, Path(d), multi=True)
+            calls = []
 
-            def fake_bundle(b, tmp, llm, spk, min_chars, hints=None, used=None):
-                if b is jobs[1]: raise RuntimeError("깨진 파일")
-                for k, it in enumerate(b.items):
-                    A.ETA.start_file(k)
-                    A.progress("step", stage="transcribe", file=k + 1, files=len(b.items))
-                    clock.tick(1); A.ETA.file_audio(60)
-                    clock.tick(14); A.progress("step", stage="transcribe", file=k + 1, files=len(b.items), percent=50.0)
-                    clock.tick(15); A.ETA.end_file()
-                A.progress("step", stage="speakers")
-                return {"segments": [], "speechMs": 0, "transcript": "", "summary": None}
+            def fake_many(p, settings, items, tmp, tools=None, on_progress=None, run_options=None, tag="g"):
+                calls.append([Path(it["wav"]).name for it in items])
+                clock.tick(15); on_progress({"percent": 50.0, "text": "조각 2/4", "workers": 2}); clock.tick(15)
+                return [RuntimeError("깨진 파일") if k == 2 else ([{"startMs": 0, "endMs": 1, "speaker": None, "text": "네"}], {k}, {}) for k in range(len(items))]
+
+            def fake_finish(b, wavs, parts, llm, spk, min_chars, announce=True, diar=None):
+                return {"segments": [s for p in parts for s in p], "speechMs": 1, "transcript": "네", "summary": None}
 
             args = argparse.Namespace(plan=False, dry_run=True, stage="transcribe", no_auto_remove=True, min_summary_chars=60)
             out = io.StringIO()
-            real = E.Eta
-            with mock.patch.object(A, "PROGRESS", True), mock.patch.object(A, "ETA", None), \
-                 mock.patch.object(A, "CHOSEN", A.Chosen(pipe, 1, {}, {"parallel": 2})), \
-                 mock.patch.object(A.E, "Eta", lambda plan, k: real(plan, k, clock=clock, path=path)), \
-                 mock.patch.object(A.runlock, "set_plan", lambda keys: None), mock.patch.object(A, "analyze_bundle", fake_bundle), \
-                 mock.patch.object(A, "bundle_hints", lambda call, b, tmp: None), contextlib.redirect_stdout(out):
+            real = E.Flow
+            with mock.patch.object(A, "PROGRESS", True), mock.patch.object(A, "ETA", None),                  mock.patch.object(A, "CHOSEN", A.Chosen(pipe, 1, {}, {"parallel": 2})),                  mock.patch.object(A.E, "Flow", lambda plan, k, groups: real(plan, k, groups, clock=clock, path=path)),                  mock.patch.object(A.runlock, "set_plan", lambda keys: None), mock.patch.object(A.P, "run_many", fake_many),                  mock.patch.object(A, "to_wav", lambda src, dst: 60_000), mock.patch.object(A, "finish_bundle", fake_finish),                  mock.patch.object(A, "bundle_hints", lambda call, b, tmp: None), mock.patch.object(A, "speakers_ready", lambda: False),                  contextlib.redirect_stdout(out):
                 A.run_jobs(args, lambda *x: None, jobs, 0, 0)
             lines = out.getvalue().splitlines()
             ev = [json.loads(l[len("@@progress "):]) for l in lines if l.startswith("@@progress ")]
             by = lambda name: [e for e in ev if e["event"] == name]
-            plan = by("plan")[0]["eta"]
-            self.assertEqual((plan["filesTotal"], plan["unknownFiles"], plan["audioTotalSec"], plan["rate"]), (4, 1, 240, 0.5))
-            self.assertAlmostEqual(plan["remainingSec"], 120)
-            self.assertEqual(set(plan), {"remainingSec", "fileRemainingSec", "endsAt", "filesDone", "filesTotal", "audioDoneSec", "audioTotalSec",
-                                         "unknownFiles", "rate", "perFileSec", "samples", "historySamples"})
-            half = [e for e in by("step") if e.get("percent") == 50.0][0]["eta"]
-            self.assertIsNotNone(half["fileRemainingSec"])
-            self.assertIsNone([e for e in by("step") if e["stage"] == "speakers"][0]["eta"]["fileRemainingSec"])
+            self.assertEqual(calls, [["p0.wav", "p1.wav", "p0.wav", "p0.wav"]])   # 묶음 셋이 한 무리, 파이프라인 한 번
+            plan = by("plan")[0]
+            self.assertEqual((plan["groups"], plan["multiInput"]), (1, True))
+            self.assertEqual((plan["eta"]["filesTotal"], plan["eta"]["unknownFiles"], plan["eta"]["audioTotalSec"], plan["eta"]["rate"]), (4, 1, 240, 0.5))
+            self.assertAlmostEqual(plan["eta"]["remainingSec"], 120)
+            start = by("start")[0]
+            self.assertEqual((start["i"], start["last"], start["bundles"], start["files"]), (1, 3, 3, 4))
+            half = [e for e in by("step") if e.get("percent") == 50.0][0]
+            self.assertEqual((half["file"], half["files"], half["groupFiles"], half["workers"]), (1, 1, 4, 2))
+            self.assertIsNotNone(half["eta"]["fileRemainingSec"])
             self.assertTrue(all("eta" in e for e in by("start") + by("done") + by("error")))
-            self.assertEqual(by("error")[0]["eta"]["filesDone"], 3)
+            self.assertEqual([e["i"] for e in by("done")], [1, 3])   # 차례대로, 실패한 묶음 2는 error
+            self.assertEqual(len(by("error")), 1)
+            self.assertIn("깨진 파일", by("error")[0]["message"])
             last = by("done")[-1]["eta"]
             self.assertEqual((last["filesDone"], last["remainingSec"]), (4, 0))
             self.assertNotIn("eta", by("end")[0])
-            self.assertTrue(any("남은 예상" in l for l in lines if l.startswith("[1/3]")))
-            self.assertEqual(len(E.load_history(E.key({"name": "fake", "version": "1", "settingsVersion": 1}, {"parallel": 2}), path)), 3 + 3)   # 실패한 묶음은 빼고
+            self.assertEqual(by("end")[0]["failed"], 1)
+            self.assertEqual(len(E.load_history(key, path)), 3 + 3)   # 실패한 묶음은 빼고
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
   "description": "whisper-cpp@2를 가볍게: 반복 억제(-mc 0, 30초 안팎 조각마다 Silero VAD, 조각 품질 검사 → 걸린 조각만 온도 올려 한 번 다시 → suspect, 반복 필터, 무음 환각 필터, 단어장 힌트)는 그대로 두고 greedy 디코딩(-bs 1 -bo 1), whisper 자체 온도 fallback 끔(-nf). 설정: CPU로만 돌리기(-ng)·스레드·VAD 문턱·VAD를 녹음 전체에 한 번(sherpa, 기본 꺼짐). 진행도 @@progress",
   "autoRecommend": false,
   "hints": true,
+  "multiInput": true,
   "entry": "transcribe.py",
   "settings": {
     "asrModel": {"type": "whisper-model", "default": "batisay-ko-turbo-q8_0", "label": "전사 모델"},

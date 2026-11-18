@@ -4,6 +4,7 @@
   "description": "whisper.cpp(whisper-cli, Vulkan), 한국어, 반복 환각 막기: 앞 글 힌트 끔(-mc 0), 30초 안팎 조각마다 따로 전사(조각마다 Silero VAD), 조각 품질 검사(구절 반복·같은 글자 연속·압축률·글자/초) → 걸리면 온도를 올려 한 번 다시 → 그래도 걸리면 suspect 표시, 반복 필터(같은 구절 3번 넘게 → 1번, u/ 같은 기호 부스러기 제거), 무음 환각 문장 필터, 단어장 힌트(녹음마다 고른 이름·용어를 --prompt로, 전사 뒤 고침 짝 치환)",
   "autoRecommend": true,
   "hints": true,
+  "multiInput": true,
   "entry": "transcribe.py",
   "settings": {
     "asrModel": {"type": "whisper-model", "default": "batisay-ko-turbo-q8_0", "label": "전사 모델"},

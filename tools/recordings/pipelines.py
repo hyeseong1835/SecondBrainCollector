@@ -21,6 +21,13 @@
   형식 "auto-count"(2026-11-18): "auto" 또는 1 이상의 정수(예: parallel = whisper-cli 동시 실행 수, auto = 파이프라인이 자원을 재 스스로 조정).
   진행 줄에 "workers"(1 이상 정수, 지금 동시에 돌리는 프로세스 수)를 낼 수 있다(선택, run()이 percent·text와 함께 넘긴다).
   run(stats={})를 주면 O.json의 "stats"(파이프라인 통계, 선택)를 담아 준다.
+여러 입력(2026-11-18): 매니페스트 "multiInput": true인 파이프라인은 wav 여러 개를 한 번에 받는다(모델 올리기·작업자 풀을 파일마다가 아니라 한 번에).
+  실행: python <entry> --inputs I.json --settings S.json [--run-options R.json]
+  I.json = {"inputs": [{"wav": W, "out": O.json, "words": bool, "hints": H.json 또는 null}, …]}. 입력마다 O.json은 한 개 모드와 같은 꼴
+  ({"segments", "stats"?, "vocabUsed"?}), 그 입력만 실패했으면 {"error": "글"}(다른 입력은 계속). 전체가 실패하면 종료 코드 ≠ 0.
+  입력마다 결과는 그 wav 하나로 돌린 것과 같아야 한다(시험으로 확인). 진행 줄 percent = 이번 호출 전체(입력 모두) 안의 진행.
+  run_many()가 부른다. 한 개 모드(--wav)도 그대로 받아야 한다.
+정리(2026-11-18): run·run_many가 띄운 파이프라인 프로세스는 ACTIVE에 두고, 끝나거나 kill_all()이면 프로세스 트리째(whisper-cli 포함) 끝낸다.
 """
 import json, os, re, shutil, subprocess, sys, threading, time
 from collections import deque
@@ -46,6 +53,7 @@ class Pipeline:
     folder: Path
     hints: bool = False   # --hints(단어장 힌트 파일)를 받는가
     run_schema: dict | None = None   # 실행 옵션 {키: {type, default, label}}(없으면 --run-options를 넘기지 않음)
+    multi: bool = False   # --inputs(여러 입력)를 받는가(매니페스트 multiInput)
 
     @property
     def key(self) -> str:
@@ -76,7 +84,8 @@ def load(folder: Path) -> Pipeline:
         raise ValueError("runOptions는 {키: {type, default, label}} 꼴이어야 합니다")
     if both := sorted(set(schema) & set(run_schema)):
         raise ValueError(f"settings와 runOptions에 같은 키가 있습니다: {', '.join(both)}")
-    return Pipeline(name, version, str(m.get("description") or ""), bool(m.get("autoRecommend")), entry, schema, folder, m.get("hints") is True, run_schema)
+    return Pipeline(name, version, str(m.get("description") or ""), bool(m.get("autoRecommend")), entry, schema, folder, m.get("hints") is True, run_schema,
+                    m.get("multiInput") is True)
 
 
 def discover(roots: list | None = None, warn=None) -> dict:
@@ -224,6 +233,7 @@ def listing(pipes: dict, root: Path | None = None, local: dict | None = None) ->
         vs = versions(p, root)
         row = {"name": p.name, "version": p.version, "description": p.description, "autoRecommend": p.auto_recommend,
                "settingsSchema": p.schema, "settingsVersions": vs, "latestSettingsVersion": vs[-1] if vs else None, "folder": str(p.folder), "hints": p.hints}
+        if p.multi: row["multiInput"] = True
         if p.run_schema: row.update(runOptionsSchema=p.run_schema, runOptions=run_values(p, local))
         out.append(row)
     return out
@@ -278,16 +288,71 @@ def run(p: Pipeline, settings: dict, wav: Path, tmp: Path, words: bool = False, 
     run_options = 실행 옵션 값(run_values). 매니페스트에 runOptions가 있으면 기본값을 채워 --run-options로 넘긴다.
     stats = 딕셔너리를 주면 O.json의 "stats"(객체일 때)를 담는다."""
     s_path, o_path = tmp / f"{wav.stem}.settings.json", tmp / f"{wav.stem}.segments.json"
+    o_path.unlink(missing_ok=True)
+    cmd = ["--wav", str(wav), "--out", str(o_path)] + (["--words"] if words else []) + (["--hints", str(hints)] if hints and p.hints else [])
+    _launch(p, settings, cmd, s_path, tmp / f"{wav.stem}.run-options.json", tools, on_progress, run_options)
+    return _result(p, o_path, used, stats)
+
+
+def run_many(p: Pipeline, settings: dict, items: list, tmp: Path, tools: Path | None = None, on_progress=None, run_options: dict | None = None,
+             tag: str = "many") -> list:
+    """여러 입력(매니페스트 multiInput)으로 wav 여러 개 → 입력마다 (구간들, 쓴 단어장 id 집합, stats 딕셔너리) 또는 그 입력의 RuntimeError.
+    items = [{"wav": Path, "words": bool, "hints": Path 또는 None}]. 호출 전체가 실패하면(종료 코드 ≠ 0) RuntimeError를 던진다.
+    on_progress = 호출 전체 진행(percent는 입력 모두 안의 진행). tag = tmp 안 파일 이름 앞(같은 tmp에서 여러 번 부를 때 겹치지 않게)"""
+    if not p.multi: raise ValueError(f"{p.key}는 여러 입력을 받지 않습니다(multiInput)")
+    rows, outs = [], []
+    for k, it in enumerate(items):
+        o = tmp / f"{tag}.{k}.segments.json"
+        o.unlink(missing_ok=True)
+        outs.append(o)
+        rows.append({"wav": str(it["wav"]), "out": str(o), "words": bool(it.get("words")), "hints": str(it["hints"]) if it.get("hints") and p.hints else None})
+    i_path = tmp / f"{tag}.inputs.json"
+    i_path.write_text(json.dumps({"inputs": rows}, ensure_ascii=False), encoding="utf-8")
+    _launch(p, settings, ["--inputs", str(i_path)], tmp / f"{tag}.settings.json", tmp / f"{tag}.run-options.json", tools, on_progress, run_options)
+    out = []
+    for o in outs:
+        try:
+            used, stats = set(), {}
+            out.append((_result(p, o, used, stats), used, stats))
+        except RuntimeError as e:
+            out.append(e)
+    return out
+
+
+ACTIVE = set()   # 지금 돌고 있는 파이프라인 프로세스(kill_all이 끝낸다)
+ACTIVE_LOCK = threading.Lock()
+
+
+def kill_tree(proc):
+    """프로세스와 그 자식들(whisper-cli)까지 끝낸다. Windows는 taskkill /T(python만 죽이면 whisper-cli가 남는다)"""
+    if proc.poll() is not None: return
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if proc.poll() is None:
+        try: proc.kill()
+        except OSError: pass
+
+
+def kill_all():
+    """돌고 있는 파이프라인 프로세스를 모두 트리째 끝낸다(취소·중단)"""
+    with ACTIVE_LOCK: procs = list(ACTIVE)
+    for proc in procs: kill_tree(proc)
+
+
+def _launch(p: Pipeline, settings: dict, args: list, s_path: Path, r_path: Path, tools, on_progress, run_options):
+    """파이프라인 하나를 돌려 진행 줄을 넘기고 끝날 때까지 기다린다. 종료 코드 ≠ 0이면 RuntimeError(stderr 끝)"""
     s_path.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
     extra = []
     if p.run_schema:
-        r_path = tmp / f"{wav.stem}.run-options.json"
         r_path.write_text(json.dumps(run_values(p, overrides=run_options), ensure_ascii=False), encoding="utf-8")
         extra = ["--run-options", str(r_path)]
-    o_path.unlink(missing_ok=True)
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "SECONDBRAIN_ANALYSIS_TOOLS": str(tools or sbpaths.TOOLS)}
-    cmd = [sys.executable, str(p.entry), "--wav", str(wav), "--out", str(o_path), "--settings", str(s_path)] + (["--words"] if words else []) + (["--hints", str(hints)] if hints and p.hints else []) + extra
+    cmd = [sys.executable, str(p.entry)] + args + ["--settings", str(s_path)] + extra
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=env, cwd=str(p.folder))
+    with ACTIVE_LOCK: ACTIVE.add(proc)
     err, other = [], deque(maxlen=20)   # 표준 오류는 따로 읽어(안 읽으면 가득 차 멈춘다) 끝만 남긴다
     reader = threading.Thread(target=lambda: err.extend(deque(proc.stderr, maxlen=20)), daemon=True)
     reader.start()
@@ -300,13 +365,19 @@ def run(p: Pipeline, settings: dict, wav: Path, tmp: Path, words: bool = False, 
                 on_progress(ev)
         returncode = proc.wait()
     finally:
-        if proc.poll() is None: proc.kill()
+        if proc.poll() is None: kill_tree(proc)
+        with ACTIVE_LOCK: ACTIVE.discard(proc)
         reader.join()
         proc.stdout.close(); proc.stderr.close()
     if returncode != 0:
         raise RuntimeError(f"{p.key} 실패(종료 코드 {returncode}): " + ("".join(err) or "".join(other))[-400:].strip())
+
+
+def _result(p: Pipeline, o_path: Path, used: set | None, stats: dict | None) -> list:
+    """O.json 하나 → 구간들. {"error"}면(여러 입력의 그 입력만 실패) 또는 읽지 못하면 RuntimeError"""
     try:
         res = json.loads(o_path.read_text(encoding="utf-8-sig"))
+        if isinstance(res, dict) and res.get("error"): raise RuntimeError(f"{p.key} 실패: {str(res['error'])[-400:]}")
         segs = res["segments"]
         if used is not None: used.update(int(x) for x in res.get("vocabUsed") or [])
         if stats is not None and isinstance(res.get("stats"), dict): stats.update(res["stats"])

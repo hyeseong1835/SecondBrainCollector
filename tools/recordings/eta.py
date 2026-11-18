@@ -15,6 +15,8 @@
                "workers"?: {"now", "min", "max", "avg"}}
 - 작업자 수(2026-11-18): 파이프라인이 진행 줄에 workers(동시에 돌리는 whisper-cli 수, 자동 동시 실행)를 내면 workers(n)로 알린다.
   이번 실행에서 본 지금·최소·최대·시간 가중 평균을 eta.workers로 낸다(한 번도 안 왔으면 칸 없음). 열쇠에는 실행 옵션 값(parallel=auto)이 들어가고 실제 수는 안 들어간다.
+- 겹치기 실행(2026-11-18, Flow): analyze.py가 묶음 여러 개를 한 무리로 전사하고 준비·마무리를 겹치면 파일마다 시간을 못 잰다 → 무리마다 처리량 표본(Flow 머리말).
+  기록 열쇠에 "flow=multi"(여러 입력 파이프라인) 또는 "flow=overlap"을 더해 예전(파일마다 따로) 기록과 섞지 않는다. fileRemainingSec = 지금 전사 중인 무리(파일들)의 남은 초.
 """
 import datetime as dt, json, os, sys, time
 from pathlib import Path
@@ -166,8 +168,8 @@ class Eta:
         ab = fit(samples, len(self.history))
         return (*(ab or (None, None)), len(samples), len(self.history))
 
-    def snapshot(self, percent: float | None = None, transcribing: bool = True) -> dict:
-        """지금의 eta 딕셔너리. percent = 지금 파일 전사 진행(0~100, 없으면 None), transcribing = 전사 단계인가(화자 구분·요약이면 False)"""
+    def snapshot(self, percent: float | None = None, transcribing: bool = True, **_) -> dict:
+        """지금의 eta 딕셔너리. percent = 지금 파일 전사 진행(0~100, 없으면 None), transcribing = 전사 단계인가(화자 구분·요약이면 False). 나머지 키(file·files)는 Flow만 쓴다"""
         now = self.clock()
         a, b, n, nh = self.model()
         files_total = sum(len(r) for r in self.plan)
@@ -201,6 +203,77 @@ class Eta:
             rest += file_rem or 0.0
         out["remainingSec"] = round(rest, 1)
         out["fileRemainingSec"] = None if file_rem is None else round(file_rem, 1)
+        out["endsAt"] = dt.datetime.fromtimestamp(now + rest).astimezone().isoformat(timespec="seconds")
+        return out
+
+
+class Flow(Eta):
+    """겹치기 실행(analyze.py run_flow, 2026-11-18)의 남은 시간. 묶음 여러 개를 한 무리로 전사하고(GPU) 앞뒤 묶음의 준비·마무리(CPU)를 겹치므로
+    파일 하나에 걸린 시간을 따로 잴 수 없다. 표본 = 무리의 묶음이 모두 끝나면(마무리 차례), 앞 무리가 끝난 뒤(처음은 실행 시작) 걸린 시간을
+    그 무리의 성공한 묶음 파일들에 오디오 길이 비율로 나눈 것(= 병목 단계의 처리량). 모형·기록·작업자 수는 Eta와 같고, 기록 열쇠는 analyze.py가 따로 준다.
+    차례: start_group(묶음 번호들) → audio(묶음, 파일, 초)… → end_transcribe() → finish(묶음, ok)…, 그사이 snapshot(percent, file=, files=).
+    지금 무리 남은 시간(fileRemainingSec) = 무리 예상 × (1 − 진행) 쪽으로, 진행은 ((file − 1) + percent/100) / files(여러 입력이면 file = files = 1)."""
+
+    def __init__(self, plan: list, k: str | None = None, groups: list | None = None, **kw):
+        super().__init__(plan, k, **kw)
+        self.groups = [list(g) for g in (groups or [[i] for i in range(len(plan))])]
+        self.group_of = {i: g for g, ix in enumerate(self.groups) for i in ix}
+        self.ok = {}
+        self.active, self.t_active = None, None
+        self.t_mark = self.clock()
+
+    def start_group(self, ix: list):
+        self.active, self.t_active = list(ix), self.clock()
+
+    def audio(self, i: int, k: int, sec: float):
+        """wav를 만든 뒤 정확한 길이(초)"""
+        if sec > 0 and i < len(self.plan) and k < len(self.plan[i]): self.plan[i][k] = sec
+
+    def end_transcribe(self):
+        self.active = self.t_active = None
+
+    def finish(self, i: int, ok: bool = True):
+        """묶음 끝(마무리까지). 그 무리가 다 끝났으면 표본을 더한다"""
+        self.closed.add(i); self.ok[i] = ok
+        g = self.groups[self.group_of[i]] if i in self.group_of else [i]
+        if not all(x in self.closed for x in g): return
+        now = self.clock()
+        total, self.t_mark = now - self.t_mark, now
+        rows = [x for j in g if self.ok.get(j) for x in self.plan[j]]
+        audio = sum(rows)
+        if not rows or total <= 0: return
+        done = [(x, total * x / audio if audio > 0 else total / len(rows)) for x in rows]
+        self.run += done
+        if self.save and self.key: save_history(self.key, done, self.path)
+
+    def snapshot(self, percent: float | None = None, transcribing: bool = True, file: int | None = None, files: int | None = None) -> dict:
+        now = self.clock()
+        a, b, n, nh = self.model()
+        files_total = sum(len(r) for r in self.plan)
+        audio_total = sum(sum(r) for r in self.plan)
+        files_done = sum(len(self.plan[i]) for i in self.closed)
+        audio_done = sum(sum(self.plan[i]) for i in self.closed)
+        out = {"remainingSec": None, "fileRemainingSec": None, "endsAt": None, "filesDone": files_done, "filesTotal": files_total,
+               "audioDoneSec": round(audio_done, 1), "audioTotalSec": round(audio_total, 1), "unknownFiles": self.unknown,
+               "rate": None if a is None else round(a, 4), "perFileSec": None if b is None else round(b, 2), "samples": n, "historySamples": nh}
+        if (w := self.workers_info()) is not None: out["workers"] = w
+        if a is None or (self.unknown and self.fill <= 0): return out
+        pred = lambda i: sum(a * x + b for x in self.plan[i])
+        active = [i for i in self.active or [] if i not in self.closed]
+        rest = sum(pred(i) for i in range(len(self.plan)) if i not in self.closed and i not in active)
+        grem = None
+        if active:
+            G = sum(pred(i) for i in active)
+            elapsed = now - self.t_active
+            grem = max(0.0, G - elapsed)
+            if transcribing and percent is not None and 0 < percent <= 100:
+                f = min(1.0, ((max(1, file or 1) - 1) + percent / 100) / max(1, files or 1))
+                pace = elapsed * (1 - f) / f
+                grem = f * pace + (1 - f) * max(0.0, G * (1 - f))
+            rest += grem
+            if not transcribing: grem = None
+        out["remainingSec"] = round(rest, 1)
+        out["fileRemainingSec"] = None if grem is None else round(grem, 1)
         out["endsAt"] = dt.datetime.fromtimestamp(now + rest).astimezone().isoformat(timespec="seconds")
         return out
 

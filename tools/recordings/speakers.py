@@ -44,6 +44,17 @@ NO_ME_SOURCES = ("discord-output",)   # 내 목소리가 없는 원천: name_clu
 BOT_MAX_SEC = 300        # 봇 등록: 한 사람의 이은 소리 앞 이만큼만 화자 분리(CPU로 실시간의 약 1/9)
 
 
+_PROC_DIARIZER = None   # diarize_path가 쓰는 프로세스별 Diarizer
+
+
+def diarize_path(path: str):
+    """analyze.py 화자 분리 갈래(2026-11-18, 다른 프로세스): 16kHz wav 파일 → Diarizer.diarize (turns, embs). 프로세스마다 Diarizer 하나를 띄워 다시 쓴다.
+    프로세스로 따로 도는 까닭: sherpa-onnx가 화자 분리 중 GIL을 놓지 않아 스레드로 돌리면 analyze.py의 다른 갈래(wav 만들기·전사 진행 읽기)가 멈췄다(실측)."""
+    global _PROC_DIARIZER
+    if _PROC_DIARIZER is None: _PROC_DIARIZER = Diarizer()
+    return _PROC_DIARIZER.diarize(load_wav(Path(path)))
+
+
 def load_wav(path: Path) -> np.ndarray:
     """16kHz 모노 s16 wav → float32 [-1, 1]"""
     with wave.open(str(path)) as w:
