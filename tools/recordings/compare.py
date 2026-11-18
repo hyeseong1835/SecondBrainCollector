@@ -12,6 +12,8 @@
 - --hints H.json: 단어장 힌트 파일(pipelines.py 약속 {prompt, fixes: [{id, wrong, right}], ids})을 손으로 써서 hints 파이프라인에 넘긴다(서버 단어장은 읽지 않음).
   힌트 켬/끔은 설정 버전의 useHints로 가른다(같은 파이프라인의 두 설정 버전을 나란히).
 - --json은 실행 하나가 끝날 때마다 다시 쓴다(중간에 실패해도 돈 결과는 남게).
+- 실행 옵션(2026-11-18): --pipeline 'whisper-lite@1#1?parallel=2&yield=false'처럼 ? 뒤에 키=값(&로 여럿). 없으면 매니페스트 기본값
+  (이 기기 설정 파일의 runOptions는 쓰지 않는다: 비교가 기기 설정에 흔들리지 않게). 같은 설정 버전을 동시 실행 수만 바꿔 나란히 잴 때.
 """
 import argparse, importlib.util, json, subprocess, sys, tempfile, time
 from pathlib import Path
@@ -34,11 +36,17 @@ Q = load_quality()
 
 
 def parse_spec(text: str) -> tuple:
-    """'whisper-cpp@2#1' → ('whisper-cpp@2', 1), 'whisper-cpp@2' → ('whisper-cpp@2', None)"""
-    key, _, n = text.strip().partition("#")
+    """'whisper-cpp@2#1' → ('whisper-cpp@2', 1), 'whisper-cpp@2' → ('whisper-cpp@2', None). run=True면 셋째로 실행 옵션 {키: 값}('...?parallel=2&yield=false')"""
+    return parse_spec_run(text)[:2]
+
+
+def parse_spec_run(text: str) -> tuple:
+    body, _, query = text.strip().partition("?")
+    key, _, n = body.partition("#")
     P.parse_key(key)
     if n and (not n.isdigit() or int(n) < 1): raise ValueError(f"설정 버전은 1 이상 정수: {text}")
-    return key, int(n) if n else None
+    run = dict(P.parse_run_option(kv) for kv in query.split("&") if kv) if query else {}
+    return key, int(n) if n else None, run
 
 
 def to_clip(src: Path, dst: Path, start: float | None, duration: float | None) -> int:
@@ -61,14 +69,15 @@ def measure(segs: list, words: bool) -> tuple:
 def run_one(c: "AN.Chosen", wav: Path, words: bool, hints: Path | None = None) -> dict:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         t0 = time.time()
-        segs = P.run(c.pipe, c.settings, wav, Path(tmp), words=words, tools=AN.A, hints=hints if P.wants_hints(c.pipe, c.settings) else None)
+        segs = P.run(c.pipe, c.settings, wav, Path(tmp), words=words, tools=AN.A, hints=hints if P.wants_hints(c.pipe, c.settings) else None,
+                     run_options=c.run_options or None)
         sec = round(time.time() - t0, 1)
         try:
             stats = json.loads((Path(tmp) / f"{wav.stem}.segments.json").read_text(encoding="utf-8")).get("stats")
         except (OSError, ValueError):
             stats = None
     shown, m = measure(segs, words)
-    return {"pipeline": c.pipe.key, "settingsVersion": c.settings_version, "settings": c.settings, "seconds": sec, "metrics": m,
+    return {"pipeline": c.pipe.key, "settingsVersion": c.settings_version, "settings": c.settings, "runOptions": c.run_options, "seconds": sec, "metrics": m,
             "stats": stats, "segments": shown}
 
 
@@ -77,7 +86,8 @@ def table(rows: list) -> str:
     out = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     for r in rows:
         m = r["metrics"]
-        out.append("| " + " | ".join(str(x) for x in (r["clip"], f"{r['pipeline']}#{r['settingsVersion']}", r["seconds"], m["segments"], m["chars"],
+        run = "".join(f" {k}={v}" for k, v in (r.get("runOptions") or {}).items())
+        out.append("| " + " | ".join(str(x) for x in (r["clip"], f"{r['pipeline']}#{r['settingsVersion']}{run}", r["seconds"], m["segments"], m["chars"],
                                                          m["speechSec"], m["charsPerSec"], m["phraseRepeat"], m["charRun"], m["compression"], m["suspect"])) + " |")
     return "\n".join(out)
 
@@ -101,8 +111,15 @@ def main():
     try:
         chosen = []
         for spec in a.pipeline:
-            key, n = parse_spec(spec)
-            chosen.append(AN.choose_pipeline(key, n, None, pipes, create=False))
+            key, n, run = parse_spec_run(spec)
+            c = AN.choose_pipeline(key, n, None, pipes, create=False)
+            if run:
+                unknown = sorted(set(run) - set(c.pipe.run_schema))
+                if unknown: raise ValueError(f"{key}에 없는 실행 옵션: {', '.join(unknown)}")
+                c.run_options = P.run_values(c.pipe, overrides=run)
+                bad = sorted(k for k in run if c.run_options.get(k) != run[k])
+                if bad: raise ValueError(f"실행 옵션 형식이 맞지 않음: {', '.join(bad)}")
+            chosen.append(c)
     except ValueError as e:
         sys.exit(str(e))
     busy = runlock.acquire(["compare.py"] + sys.argv[1:])

@@ -27,17 +27,24 @@
   useGpu = false(CPU로만, seed 2)면 늘 1: 프로세스마다 -t 스레드가 같은 CPU를 다투고 메울 GPU 빈틈도 없어서.
   하나라도 실패하면 나머지를 죽이고 "whisper 실패". 진행도 = 시작한 조각 수 - 지금 조각을 돌고 있는 작업자 수(parallel 1이면 전과 같다).
   stats.parallel = 실제로 쓴 수. stats.whisper의 ms는 프로세스마다 더한 값이라 parallel > 1이면 걸린 시간(passSec)보다 클 수 있다.
+- 자동 동시 실행(2026-11-18 KST, 결과를 바꾸지 않아 같은 버전): parallel = "auto"(새 기본) 또는 고정 수, parallelMax·yield(autopar.py 머리말, whisper-cpp@2와 같은 파일).
+  번갈아 나누기 대신 공유 대기열(autopar.Pool)에서 작업자가 묶음씩 가져가고 조정기가 처리량·VRAM·GPU·CPU·메모리로 작업자 수를 바꾼다.
+  CPU로만(useGpu = false): 고정 수는 예전처럼 늘 1. 자동이면 프로세스 수만 고른다(상한 = 논리 코어 ÷ threads, GPU 양보 없음).
+  threads(-t)는 설정이라 바꾸지 않는다(스레드 수가 바뀌면 부동소수 합 순서가 달라져 결과가 바뀔 수 있다).
+  stats.parallel = 실행 옵션 값("auto" 또는 수), stats.workers = 풀 통계(다시 돌리기는 workers.retry). @@progress에 "workers"와 글 " · 작업자 N".
+  진행도의 '시작한 조각 수'는 급히 줄이며 되돌린 조각을 다시 세지 않도록 조각 수로 자른다.
 """
 import argparse, collections, json, os, re, subprocess, sys, threading, time, wave
 from pathlib import Path
 import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
+import autopar as A
 import quality as Q
 import vocab as V
 
 RATE = 16000
 FRAME_MS = 100
-BATCH = 40   # whisper-cli 한 번에 넘기는 조각 수(명령줄 길이 제한)
+BATCH = A.BATCH   # whisper-cli 한 번에 넘기는 조각 수(명령줄 길이 제한)
 GAP_MS = 100   # sherpa VAD 조각에서 말소리 구간 사이에 끼우는 무음
 VAD_ONNX = ("silero_vad.onnx", "sensevoice/silero_vad.onnx")   # models/ 아래 sherpa-onnx용 Silero VAD(앞이 우선)
 PROCESSING = re.compile(r"processing '([^']+)'")
@@ -52,8 +59,10 @@ def tools_dir() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", ".")) / "SecondBrain" / "analysis"
 
 
-def progress(percent: float, text: str):
-    print("@@progress " + json.dumps({"percent": round(percent, 1), "text": text}, ensure_ascii=False), flush=True)
+def progress(percent: float, text: str, workers: int | None = None):
+    ev = {"percent": round(percent, 1), "text": text + (f" · 작업자 {workers}" if workers else "")}
+    if workers: ev["workers"] = workers
+    print("@@progress " + json.dumps(ev, ensure_ascii=False), flush=True)
 
 
 def read_wav(path: Path) -> np.ndarray:
@@ -196,15 +205,28 @@ def add_timings(total: dict, line: str):
 
 
 def split_names(names: list, n: int) -> list:
-    """조각 이름들 → 작업자 n개 몫(번갈아 나눔: 앞뒤 조각 길이가 달라도 고르게). 빈 몫은 뺀다"""
+    """조각 이름들 → 작업자 n개 몫(번갈아 나눔). 2026-11-18부터 Whisper.run은 공유 대기열(autopar)을 쓰고 이것은 쓰지 않는다(시험·비교용으로 남김)"""
     n = max(1, int(n or 1))
     return [g for g in (names[i::n] for i in range(n)) if g]
 
 
+def json_ok(path: Path) -> bool:
+    """whisper-cli -oj 결과가 다 써졌는가(죽인 whisper-cli가 반쯤 쓴 파일은 아님)"""
+    try:
+        json.loads(path.read_bytes().decode("utf-8", errors="replace"))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 class Whisper:
-    """whisper-cli 실행기. 조각마다 진행도를 내고 시간 통계를 모은다. parallel개까지 동시에(통계·진행 콜백은 잠금 안에서)"""
-    def __init__(self, base: list, work: Path, parallel: int = 1):
-        self.base, self.work, self.parallel = base, work, max(1, int(parallel or 1))
+    """whisper-cli 실행기. 조각마다 진행도를 내고 시간 통계를 모은다. 실행 옵션 run대로 동시에(autopar 공유 대기열, 통계·진행 콜백은 잠금 안에서).
+    run = 실행 옵션 딕셔너리 또는 고정 수(시험). key = 처리량 표 열쇠(autopar.state_key), weights = {조각 이름: 오디오 ms}, on_workers(수) = 작업자 수가 바뀔 때"""
+    def __init__(self, base: list, work: Path, run=1, key: str = "", cpu_only: bool = False, threads: int | None = None,
+                 weights: dict | None = None, on_workers=None, **pool):
+        self.base, self.work = base, work
+        self.run_opts = run if isinstance(run, dict) or run is None else {"parallel": run}
+        self.key, self.cpu_only, self.threads, self.weights, self.on_workers, self.pool = key, cpu_only, threads, weights, on_workers, pool
         self.timings, self.gpu, self.vulkan = {}, None, {}
         self.lock = threading.Lock()
 
@@ -213,29 +235,18 @@ class Whisper:
         m = re.fullmatch(r"Vulkan(\d+)", self.gpu)
         return self.vulkan.get(m.group(1), self.gpu) if m else self.gpu
 
-    def run(self, names: list, extra: list, on_chunk):
-        """조각 wav 이름들 → 같은 이름의 .json(work 안, 상대 경로로 명령줄을 줄인다). 조각을 작업자 parallel개에 번갈아 나누고 작업자마다 BATCH씩.
-        on_chunk(이번 실행에서 시작한 조각 수, 지금 조각을 돌고 있는 작업자 수) = 'processing' 줄마다(잠금 안에서 한 번에 하나씩).
-        하나라도 실패하면 나머지 whisper-cli를 죽이고 sys.exit("whisper 실패: ...")"""
-        groups = split_names(names, self.parallel)
-        lock, stop = self.lock, threading.Event()
-        started, busy, procs, errors = [0], [False] * len(groups), [], []
+    def run(self, names: list, extra: list, on_chunk) -> dict:
+        """조각 wav 이름들 → 같은 이름의 .json(work 안, 상대 경로로 명령줄을 줄인다). 공유 대기열에서 작업자가 묶음씩(autopar).
+        on_chunk(이번 실행에서 시작한 조각 수(조각 수로 자름), 지금 조각을 돌고 있는 작업자 수) = 'processing' 줄마다(잠금 안에서 한 번에 하나씩).
+        고정 수에서 하나라도 실패하면 나머지 whisper-cli를 죽이고 sys.exit("whisper 실패: ..."). → 풀 통계"""
+        lock, started, busy = self.lock, [0], {}
 
-        def fail(err):
-            with lock:
-                if not stop.is_set(): errors.append(err)   # 처음 실패만(죽인 작업자의 종료 코드는 원인이 아니다)
-                stop.set()
-                for q in procs:
-                    if q.poll() is None: q.kill()
-
-        def one(w: int, batch: list) -> bool:
+        def launch(w: int, batch: list, on_start):
             cmd = self.base + extra
             for n in batch: cmd += ["-f", n, "-of", Path(n).stem]
             tail, vad_ms, t0, first = collections.deque(maxlen=20), 0.0, time.time(), True
             p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", cwd=str(self.work))
-            with lock:
-                procs.append(p)
-                if stop.is_set(): p.kill()   # 다른 작업자가 이미 실패했다
+            on_start(p)
             try:
                 for line in p.stderr:
                     tail.append(line.rstrip())
@@ -244,7 +255,7 @@ class Whisper:
                             if first:
                                 add_time(self.timings, "startup", (time.time() - t0) * 1000); first = False
                             started[0] += 1; busy[w] = True
-                            on_chunk(started[0], sum(busy))
+                            on_chunk(min(started[0], len(names)), sum(busy.values()))
                     elif m := VAD_TIME.search(line):
                         vad_ms = float(m.group(1))
                     elif "whisper_print_timings" in line:
@@ -254,29 +265,14 @@ class Whisper:
                     elif m := VULKAN.search(line):
                         with lock: self.vulkan[m.group(1)] = m.group(2).strip()
             finally:
-                with lock: busy[w] = False
+                with lock: busy.pop(w, None)
                 p.stderr.close()
-            if p.wait() != 0:
-                fail("whisper 실패: " + "\n".join(tail)[-400:])
-                return False
-            with lock: add_time(self.timings, "vad", vad_ms)
-            return True
-
-        def work(w: int, group: list):
-            try:
-                for i in range(0, len(group), BATCH):
-                    if stop.is_set() or not one(w, group[i:i + BATCH]): return
-            except BaseException as e:
-                fail(e)
-        if len(groups) <= 1:
-            for g in groups: work(0, g)
-        else:
-            threads = [threading.Thread(target=work, args=(w, g), daemon=True) for w, g in enumerate(groups)]
-            for t in threads: t.start()
-            for t in threads: t.join()
-        if errors:
-            if isinstance(errors[0], BaseException): raise errors[0]
-            sys.exit(errors[0])
+            code = p.wait()
+            if code == 0:
+                with lock: add_time(self.timings, "vad", vad_ms)
+            return code, "\n".join(tail)
+        return A.run_pool(names, launch, lambda n: json_ok(self.work / f"{Path(n).stem}.json"), lambda n: (self.work / f"{Path(n).stem}.json").unlink(missing_ok=True),
+                          self.weights, self.run_opts, key=self.key, cpu_only=self.cpu_only, threads=self.threads, on_workers=self.on_workers, **self.pool)
 
 
 def badness(fails: list, m: dict) -> tuple:
@@ -285,7 +281,7 @@ def badness(fails: list, m: dict) -> tuple:
 
 def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, hints: dict | None = None, run: dict | None = None) -> tuple:
     """→ (구간들, 통계, 쓴 단어장 id들). hints = vocab.load() 결과(없으면 힌트 없이).
-    run = 실행 옵션(결과를 바꾸지 않음): parallel(없으면 1, useGpu = false면 늘 1)"""
+    run = 실행 옵션(결과를 바꾸지 않음): parallel("auto" 또는 수, 없으면 1. useGpu = false면 고정 수는 늘 1)·parallelMax·yield(autopar.parse)"""
     hints = hints if hints and settings.get("useHints", True) else None
     prompt = hints["prompt"] if hints else ""
     exe = tools / "src" / "whisper.cpp" / "build" / "bin" / "whisper-cli.exe"
@@ -315,14 +311,20 @@ def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, 
         name = f"c{k:04d}.wav"
         write_wav(work / name, chunk_audio(samples, pieces))
         names.append(name)
-    par = max(1, int((run or {}).get("parallel") or 1)) if settings.get("useGpu", True) else 1
-    w = Whisper(base_args(exe, model, vad if engine == "whisper" else None, settings, words, prompt), work, par)
+    cpu_only = not settings.get("useGpu", True)
+    opts = A.parse(run, cpu_only)
+    workers = [None if not opts["auto"] and opts["n"] == 1 else opts["n"]]   # 진행도에 낼 작업자 수(고정 1이면 내지 않아 전과 같다)
+    say = lambda pct, text: progress(pct, text, workers[0])
+    w = Whisper(base_args(exe, model, vad if engine == "whisper" else None, settings, words, prompt), work, run or {},
+                key=A.state_key(Path(__file__).parent.name, settings, words), cpu_only=cpu_only, threads=int(settings["threads"]),
+                weights={n: sum(b - a for a, b in pieces) for n, pieces in zip(names, chunks)},
+                on_workers=(lambda n: workers.__setitem__(0, n)) if opts["auto"] or opts["n"] > 1 else None)
     # whisper-cli가 한글 한 글자를 토큰 경계에서 잘라 깨진 UTF-8을 낼 때가 있다(2026-11-16 단어 단위 실측). 깨진 바이트는 버린다
     load = lambda k: chunk_segments(json.loads((work / f"c{k:04d}.json").read_bytes().decode("utf-8", errors="replace")), chunks[k])
     m = len(chunks)
-    progress(0, f"조각 0/{m}")
+    say(0, f"조각 0/{m}")
     t0 = time.time()
-    w.run(names, [], lambda i, busy: progress(90 * (i - busy) / m, f"조각 {i}/{m}"))
+    w1 = w.run(names, [], lambda i, busy: say(90 * max(0, i - busy) / m, f"조각 {i}/{m}")) or {}
     pass_sec = [round(time.time() - t0, 1)]
     result = [load(k) for k in range(m)]
     checks = [Q.failures(Q.metrics(segs), settings) for segs in result]
@@ -332,14 +334,14 @@ def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, 
         for k in bad: (work / f"c{k:04d}.json").unlink(missing_ok=True)
         r = len(bad)
         t1 = time.time()
-        w.run([names[k] for k in bad], ["-tp", str(temp)], lambda i, busy: progress(90 + 10 * (i - busy) / r, f"다시 돌리는 중 {i}/{r}"))
+        w1["retry"] = w.run([names[k] for k in bad], ["-tp", str(temp)], lambda i, busy: say(90 + 10 * max(0, i - busy) / r, f"다시 돌리는 중 {i}/{r}"))
         pass_sec.append(round(time.time() - t1, 1))
         for k in bad:
             again = load(k)
             f2 = Q.failures(Q.metrics(again), settings)
             if badness(f2, Q.metrics(again)) < badness(checks[k], Q.metrics(result[k])):
                 result[k], checks[k] = again, f2
-    progress(100, "끝")
+    say(100, "끝")
     out, n_suspect, n_dropped = [], 0, 0
     for segs, fails in zip(result, checks):
         segs = Q.clean(segs, int(settings["maxPhraseRepeat"]))
@@ -357,7 +359,7 @@ def transcribe(wav: Path, work: Path, settings: dict, words: bool, tools: Path, 
     return out, {"chunks": m, "retried": len(bad) if temp > 0 else 0, "suspectChunks": n_suspect, "droppedChunks": n_dropped,
                  "failures": {f"{c[0][0] // 1000}s": f for c, f in zip(chunks, checks) if f},
                  "prompt": prompt, "fixedSegments": n_fixed, "passSec": pass_sec, "device": w.device(), "vad": {"engine": engine, **vad_stats},
-                 "whisper": w.timings, "parallel": par}, used
+                 "whisper": w.timings, "parallel": "auto" if opts["auto"] else opts["n"], "workers": w1}, used
 
 
 def main():
