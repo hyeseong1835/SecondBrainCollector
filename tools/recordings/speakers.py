@@ -11,6 +11,8 @@ CLI:
   python speakers.py who CLUSTER 이름   # 모르는 화자 묶음에 이름 정하기
   python speakers.py enroll-bot [--max-bundles 10] [--max-sec 300] [--redo] [--dry-run] [FILE…]   # 지난 디스코드 봇 녹음(사람별 파일)으로 목소리 등록(전사 안 함)
   python speakers.py alias 별칭 사람이름 | --remove 별칭   # 디스코드 표시 이름 ↔ 연락처 이름 잇기(그 별칭 표본을 사람 이름으로 옮김)
+  python speakers.py voice-checks [--json] [--push]   # 목소리 동명이인 신호(2026-11-19, voices.voice_checks): 한 이름의 표본이 서로 다른 목소리 무리로 갈린 사람.
+                                                       # 셈만(서버에 묻지 않음). --push면 사람 표를 읽어 personId를 붙여 POST /api/persons/voice-checks(통째로)
 디스코드(2026-11-18): discord-output(내 PC로 들린 디스코드 소리, 내 목소리 없음)은 '나'를 찾지 않고 화자N + 등록 목소리 이름만(NO_ME_SOURCES).
   discord-bot 전사 때 사람별 파일로 그 사람 목소리를 자동 등록(--dry-run이면 저장 안 함). 이름 붙이기는 녹음과 같은 음질 갈래(voices.grade)의 평균을 먼저 쓴다.
 
@@ -450,6 +452,31 @@ def show_voices(as_json=False, person=None):
         print(f"    묶음 {g['cluster']}: 녹음 {len(g['files'])}개 {g['sec']:.0f}초  {', '.join(g['files'][:3])}")
 
 
+def voice_checks(as_json=False, push=False, store=None, call=None):
+    """목소리 동명이인 신호를 보인다. push면 사람 표(personId)를 읽어 서버에 올린다(analyze.py는 실행 끝에 저절로, persons.py). → items"""
+    import persons as PS
+    store = store if store is not None else V.Store(VOICES)
+    if push:
+        if call is None:
+            from analyze import api
+            call = api()
+        PS.load(call)
+    items = PS.voice_check_items(store)
+    if as_json:
+        print(json.dumps({"items": items, "minSec": V.VOICE_CHECK_MIN_SEC, "apart": V.VOICE_CHECK_APART}, ensure_ascii=False, indent=1))
+    else:
+        for it in items:
+            print(f"  {it['person']}" + (f" (#{it['personId']})" if "personId" in it else "")
+                  + f": 표본 {it['samples']}개 · 녹음 {it['files']}개 → 목소리 무리 {len(it['groups'])}개, 서로 가장 닮은 값 {it['similarity']:.2f}")
+            for k, g in enumerate(it["groups"], 1):
+                print(f"      무리 {k}: 녹음 {len(g['files'])}개 {g['sec']:.0f}초  {', '.join(g['files'][:3])}" + (" …" if len(g["files"]) > 3 else ""))
+        print(f"목소리 동명이인 신호 {len(items)}개(무리마다 {V.VOICE_CHECK_MIN_SEC:.0f}초 이상, 무리 평균과 나머지 평균이 {V.VOICE_CHECK_APART} 미만이면 다른 목소리)")
+    if push:
+        if PS.DIRECTORY is None: print("사람 표를 못 읽어(옛 서버·오프라인) 올리지 않음")
+        else: PS.push_voice_checks(call, store)
+    return items
+
+
 def forget(person=None, sample=None, file=None):
     store = V.Store(VOICES)
     n = store.remove_sample(sample) if sample is not None else store.remove_file(file) if file else store.remove_person(person)
@@ -478,6 +505,7 @@ if __name__ == "__main__":
     eb = sub.add_parser("enroll-bot"); eb.add_argument("--max-bundles", type=int, default=10); eb.add_argument("--max-sec", type=int, default=BOT_MAX_SEC)
     eb.add_argument("--redo", action="store_true"); eb.add_argument("--dry-run", action="store_true"); eb.add_argument("files", nargs="*")
     al = sub.add_parser("alias"); al.add_argument("name"); al.add_argument("person", nargs="?"); al.add_argument("--remove", action="store_true")
+    vc = sub.add_parser("voice-checks"); vc.add_argument("--json", action="store_true"); vc.add_argument("--push", action="store_true")
     a = ap.parse_args()
     if a.cmd == "enroll": enroll(a.max_calls)
     elif a.cmd == "test": test(Path(a.file), a.speakers)
@@ -488,4 +516,5 @@ if __name__ == "__main__":
     elif a.cmd == "alias":
         if not a.remove and not a.person: ap.error("alias 별칭 사람이름 (또는 --remove 별칭)")
         alias(a.name, a.person, a.remove)
+    elif a.cmd == "voice-checks": voice_checks(a.json, a.push)
     else: who(a.cluster, a.person)

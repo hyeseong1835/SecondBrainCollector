@@ -167,14 +167,15 @@ def discord_name(user_id, fallback=None, date=None, book: Book | None = None):
 
 def sync_aliases(store, book: Book | None = None, save=True, log=print, discord: Book | None = None) -> int:
     """한 사람만 가리키는 이름(전화번호부 + 지정한 디스코드 계정의 이름)을 목소리 저장소 별칭으로(이미 같으면 그대로). 바꾼 별칭 수.
-    두 플랫폼이 같은 이름을 다른 사람으로 가리키면 만들지 않는다. 사람이 '나'면 건너뛴다"""
+    두 플랫폼이 같은 이름을 다른 사람으로 가리키면 만들지 않는다. 사람이나 이름이 '나'면 건너뛴다('나'를 다른 이름으로 접지 않고, 무엇도 '나'로 접지 않는다)"""
     pairs = dict((book or BOOK).unambiguous())
     for name, person in (discord if discord is not None else DISCORD).unambiguous(assigned_only=True).items():
         if name in pairs and norm(pairs[name]) != norm(person): pairs.pop(name); continue
         pairs.setdefault(name, person)
     n, moved = 0, 0
     for name, person in pairs.items():
-        if person == "나" or store.canonical(name) == store.canonical(person): continue
+        cn, cp = store.canonical(name), store.canonical(person)
+        if "나" in (person, name, cn, cp) or cn == cp: continue
         try:
             moved += store.set_alias(name, person)
             n += 1
