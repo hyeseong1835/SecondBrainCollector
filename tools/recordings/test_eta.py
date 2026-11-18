@@ -156,6 +156,16 @@ class EtaTests(unittest.TestCase):
         self.assertIsNone(snap["remainingSec"])
         self.assertEqual(snap["unknownFiles"], 2)
 
+    def test_workers(self):
+        """파이프라인이 낸 작업자 수: 지금·최소·최대·시간 가중 평균. 안 왔으면 칸 없음"""
+        c = Clock()
+        e = E.Eta([[60.0]], None, history=[], clock=c, save=False)
+        self.assertNotIn("workers", e.snapshot())
+        e.workers(2); c.t += 10; e.workers(4); c.t += 30; e.workers(3)
+        self.assertEqual(e.snapshot()["workers"], {"now": 3, "min": 2, "max": 4, "avg": 3.5})   # (2×10 + 4×30) / 40
+        c.t += 40
+        self.assertEqual(e.snapshot()["workers"]["avg"], 3.25)                                # + 3×40 → 260 / 80
+
     def test_human(self):
         self.assertEqual([E.human(x) for x in (None, 4.6, 125, 3600 + 300)], ["계산 중", "5초", "2분", "1시간 5분"])
 

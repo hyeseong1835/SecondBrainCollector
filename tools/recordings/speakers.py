@@ -1,6 +1,6 @@
 """화자 구분(2026-11-11): sherpa-onnx로 화자 분리(pyannote segmentation 3.0 + 화자 임베딩)를 하고, '나' 기준 임베딩과 견줘 구간마다 speaker를 붙인다.
 
-analyze.py가 쓰는 함수: load_wav, Diarizer.diarize, name_clusters, apply_voices, label_segments, Me.load
+analyze.py가 쓰는 함수: load_wav, Diarizer.diarize, name_clusters, apply_voices, label_segments, Me.load, enroll_bot_tracks
 CLI:
   python speakers.py enroll [--max-calls 30]   # 통화 녹음으로 '나' 기준을 만든다(me.npy)
   python speakers.py test FILE [--speakers N]   # 파일 하나를 분리해 화자별 시간·'나' 유사도·등록 목소리와 견준 이름을 보인다(저장 안 함)
@@ -9,6 +9,10 @@ CLI:
   python speakers.py forget 이름 | --sample ID | --file "call/…m4a"   # 틀린 등록 지우기
   python speakers.py enroll-calls [--max-calls 20] [--per-person 3] [--max-sec 300] [--redo] [FILE…]   # 지난 통화들로(FILE을 주면 그것만) 상대 목소리를 한 번에 등록(전사 안 함)
   python speakers.py who CLUSTER 이름   # 모르는 화자 묶음에 이름 정하기
+  python speakers.py enroll-bot [--max-bundles 10] [--max-sec 300] [--redo] [--dry-run] [FILE…]   # 지난 디스코드 봇 녹음(사람별 파일)으로 목소리 등록(전사 안 함)
+  python speakers.py alias 별칭 사람이름 | --remove 별칭   # 디스코드 표시 이름 ↔ 연락처 이름 잇기(그 별칭 표본을 사람 이름으로 옮김)
+디스코드(2026-11-18): discord-output(내 PC로 들린 디스코드 소리, 내 목소리 없음)은 '나'를 찾지 않고 화자N + 등록 목소리 이름만(NO_ME_SOURCES).
+  discord-bot 전사 때 사람별 파일로 그 사람 목소리를 자동 등록(--dry-run이면 저장 안 함). 이름 붙이기는 녹음과 같은 음질 갈래(voices.grade)의 평균을 먼저 쓴다.
 
 '나' 등록 방식(통화 29개·상대 15명, CPU 약 10분): 삼성 통화 녹음은 모노라 채널로 가를 수 없다. 대신 통화마다 화자를 둘로 나누고,
 상대가 서로 다른 통화들에 공통으로 나오는 쪽(=나)을 고른다. 상대는 통화마다 바뀌고 나는 늘 같으니
@@ -36,6 +40,8 @@ CLUSTER_THRESHOLD = 0.65 # 분리기의 묶음 거리 기준. 작을수록 화�
 MERGE_THRESHOLD = 0.55   # 폰 녹음에서 '나' 아닌 묶음끼리 이 이상 닮으면 같은 화자로 합친다
 CALL_ROOT = Path(os.environ["USERPROFILE"]) / "SecondBrainRecordings" / "call"
 SR = 16000
+NO_ME_SOURCES = ("discord-output",)   # 내 목소리가 없는 원천: name_clusters에 '나' 후보를 주지 않는다
+BOT_MAX_SEC = 300        # 봇 등록: 한 사람의 이은 소리 앞 이만큼만 화자 분리(CPU로 실시간의 약 1/9)
 
 
 def load_wav(path: Path) -> np.ndarray:
@@ -139,13 +145,26 @@ def apply_voices(store: "V.Store", source: str, file: str, at: str | None, turns
         s, msg = V.enroll_call(store, partner, file, at, embs, turns, names)
         if s and save: store.save()
         return names, set(), ("" if s else "목소리 등록 안 함: ") + msg
-    people = store.people()
+    people = store.people(grade=V.grade(source))   # 같은 음질 갈래 평균 먼저, 없으면 전체 평균(추정까지만)
     names, guessed, unnamed = V.name_groups(embs, turns, names, people)
     added = V.add_unknown(store, file, at, source, unnamed) if save else []
     if save: store.save()
     named = sorted({n for n in names.values() if n not in (ME_NAME,) and not n.startswith("화자")})
     msg = ", ".join(n + ("(추정)" if n in guessed else "") for n in named) or ("이름 붙인 화자 없음" if people else "등록된 목소리 없음")
     return names, guessed, msg + (f", 모르는 화자 {len(added)}명 쌓음" if added else "")
+
+
+def enroll_bot_tracks(store: "V.Store", d: "Diarizer", me: "Me | None", tracks: list, save=True, max_sec=None):
+    """디스코드 봇 묶음의 사람별 소리로 목소리 등록. tracks = [(표시 이름, file, at, float32 소리)].
+    소리는 앞 max_sec(기본 BOT_MAX_SEC)초만 화자 분리한다. save면 하나라도 등록됐을 때 저장. → (등록 수, 사람별 메시지)"""
+    n, msgs = 0, []
+    for display, file, at, x in tracks:
+        turns, embs = d.diarize(np.asarray(x, np.float32)[:SR * (max_sec or BOT_MAX_SEC)])
+        got, msg = V.enroll_bot(store, display, file, at, embs, turns, me)
+        n += got is not None
+        msgs.append(msg if got else "등록 안 함: " + msg)
+    if n and save: store.save()
+    return n, msgs
 
 
 def label_segments(segs: list, turns: list, names: dict, guessed: set = frozenset()) -> None:
@@ -266,8 +285,8 @@ def test(path: Path, num_speakers=None):
         _to_wav(FFMPEG, path, wav)
         turns, embs = d.diarize(load_wav(wav), num_speakers)
     partner = call_partner(path) if path.parent.parent == CALL_ROOT else None
-    names = name_clusters(embs, me, turns, partner)
     source = "call" if partner else path.parent.parent.name
+    names = name_clusters(embs, None if source in NO_ME_SOURCES else me, turns, partner)
     names, guessed, msg = apply_voices(store, source, _rel(path), started_from_name(path).isoformat(), turns, embs, names, me, partner, save=False)
     people = store.people()
     for k, e in embs.items():
@@ -321,6 +340,61 @@ def enroll_calls(max_calls=20, per_person=3, max_sec=300, min_sec=20, redo=False
     show_voices()
 
 
+def enroll_bot(max_bundles=10, max_sec=BOT_MAX_SEC, redo=False, files=None, dry_run=False):
+    """지난 디스코드 봇 녹음으로 사람 목소리를 등록한다(화자 분리만, 전사 안 함). 묶음(bundles.DEFAULT_RULE)마다 사람별 파일을 이어
+    enroll_bot_tracks. 최근 묶음부터 max_bundles개. 이미 등록한 묶음(그 사람 첫 파일이 표본에 있음)은 건너뛴다(--redo면 다시). files를 주면 그 파일이 든 묶음만."""
+    import analyze as A, bundles as B
+    store, me = V.Store(VOICES), Me.load()
+    if me is None: print("  ('나' 기준 없음: 내 목소리도 등록될 수 있다. python speakers.py enroll)")
+    done = {s.get("file") for s in store.samples if s["person"]}
+    bundles = sorted(B.make_bundles(A.scan("discord-bot"), B.DEFAULT_RULE), key=lambda b: -b.start)
+    if files:
+        names = {Path(f).name for f in files}
+        bundles = [b for b in bundles if any(Path(it.rel).name in names for it in b.items)]
+    chosen = []
+    for b in bundles:
+        tracks = B.by_track(b.items)
+        if not redo and all(b.items[ix[0]].rel in done for ix in tracks.values()): continue
+        chosen.append((b, tracks))
+        if len(chosen) >= max_bundles: break
+    d, total, people = Diarizer(), 0, {}
+    with tempfile.TemporaryDirectory() as tmp:
+        wav = Path(tmp) / "b.wav"
+        for i, (b, tracks) in enumerate(chosen, 1):
+            got = []
+            for ix in tracks.values():
+                first, parts, n = b.items[ix[0]], [], 0
+                for k in ix:
+                    if n >= SR * max_sec: break
+                    try:
+                        _to_wav(A.FFMPEG, b.items[k].path, wav); x = load_wav(wav)
+                    except Exception as e:
+                        print(f"      {Path(b.items[k].rel).name} 건너뜀: {e!r}"); continue
+                    parts.append(x); n += len(x)
+                if parts: got.append((first.speaker, first.rel, A.iso(first.start), np.concatenate(parts)))
+            n_ok, msgs = enroll_bot_tracks(store, d, me, got, save=not dry_run, max_sec=max_sec)
+            total += n_ok
+            for (who, *_), msg in zip(got, msgs):
+                ok = not msg.startswith("등록 안 함")
+                people.setdefault(who, [0, 0])[0 if ok else 1] += 1
+            print(f"  [{i}/{len(chosen)}] {A.hms(b.start)} 파일 {len(b.items)}개 사람 {len(tracks)}명 → 등록 {n_ok}", flush=True)
+            for m in msgs: print("      " + m)
+    print(f"묶음 {len(chosen)}개에서 표본 {total}개 등록" + (" (--dry-run: 저장 안 함)" if dry_run else f" → {VOICES}"))
+    for who, (ok, no) in sorted(people.items(), key=lambda t: -t[1][0]):
+        print(f"  {who}: 등록 {ok} / 안 함 {no}" + (f" (별칭 → {store.canonical(who)})" if store.canonical(who) != who else ""))
+    if not dry_run: show_voices()
+
+
+def alias(name: str, person: str | None = None, remove=False):
+    store = V.Store(VOICES)
+    if remove:
+        print("별칭 지움" if store.remove_alias(name) else "그런 별칭 없음")
+    else:
+        n = store.set_alias(name, person)
+        print(f"{name} → {store.canonical(name)} (표본 {n}개 옮김)")
+    store.save()
+
+
 def show_voices(as_json=False, person=None):
     store = V.Store(VOICES)
     ppl, close, unk = store.summary(), store.close_people(), V.unknown_groups(store)
@@ -329,14 +403,16 @@ def show_voices(as_json=False, person=None):
     if as_json:
         for p in ppl:
             if not person: p.pop("items")
-        print(json.dumps({"people": ppl, "closePeople": close, "unknownGroups": unk}, ensure_ascii=False, indent=1))
+        print(json.dumps({"people": ppl, "closePeople": close, "unknownGroups": unk, "aliases": store.aliases}, ensure_ascii=False, indent=1))
         return
     for p in ppl:
-        print(f"  {p['person']:24} 표본 {p['samples']:3}  말 {p['sec']:7.1f}초  평균과 유사도 {p['simMean']:.2f}(최소 {p['simMin']:.2f})  최근 {p['last'][:16]}")
+        print(f"  {p['person']:24} 표본 {p['samples']:3}  말 {p['sec']:7.1f}초  평균과 유사도 {p['simMean']:.2f}(최소 {p['simMin']:.2f})  최근 {p['last'][:16]}  "
+              + " ".join(f"{g or '?'} {n}" for g, n in p["grades"].items()))
         if person:
             for s in p["items"]:
                 print(f"      #{s['id']:<5} {s['sim']:.2f}  {s.get('sec', 0):6.1f}초  {s.get('file')}" + ("  (확인함)" if s.get("confirmed") else ""))
     if not ppl: print("  등록된 사람 없음")
+    for a, b in store.aliases.items(): print(f"  별칭: {a} → {b}")
     for a, b, x in close: print(f"  닮은 사람: {a} ~ {b} {x:.2f}(같은 사람이면 하나를 지우거나 그대로 두기)")
     n_unk = sum(1 for s in store.samples if s["person"] is None)
     print(f"  모르는 화자 표본 {n_unk}개, 여러 녹음에 나온 묶음 {len(unk)}개")
@@ -369,10 +445,17 @@ if __name__ == "__main__":
     c = sub.add_parser("enroll-calls"); c.add_argument("--max-calls", type=int, default=20); c.add_argument("--per-person", type=int, default=3)
     c.add_argument("--max-sec", type=int, default=300); c.add_argument("--redo", action="store_true"); c.add_argument("files", nargs="*")
     w = sub.add_parser("who"); w.add_argument("cluster", type=int); w.add_argument("person")
+    eb = sub.add_parser("enroll-bot"); eb.add_argument("--max-bundles", type=int, default=10); eb.add_argument("--max-sec", type=int, default=BOT_MAX_SEC)
+    eb.add_argument("--redo", action="store_true"); eb.add_argument("--dry-run", action="store_true"); eb.add_argument("files", nargs="*")
+    al = sub.add_parser("alias"); al.add_argument("name"); al.add_argument("person", nargs="?"); al.add_argument("--remove", action="store_true")
     a = ap.parse_args()
     if a.cmd == "enroll": enroll(a.max_calls)
     elif a.cmd == "test": test(Path(a.file), a.speakers)
     elif a.cmd == "voices": show_voices(a.json, a.person)
     elif a.cmd == "forget": forget(a.person, a.sample, a.file)
     elif a.cmd == "enroll-calls": enroll_calls(a.max_calls, a.per_person, a.max_sec, redo=a.redo, files=a.files)
+    elif a.cmd == "enroll-bot": enroll_bot(a.max_bundles, a.max_sec, a.redo, a.files, a.dry_run)
+    elif a.cmd == "alias":
+        if not a.remove and not a.person: ap.error("alias 별칭 사람이름 (또는 --remove 별칭)")
+        alias(a.name, a.person, a.remove)
     else: who(a.cluster, a.person)

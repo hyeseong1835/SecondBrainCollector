@@ -24,6 +24,8 @@
     "hintContext": {"type": "number", "default": 224, "label": "힌트가 있을 때 -mc(whisper.cpp는 -mc 0이면 --prompt도 버림. 조각 안의 앞 글도 이만큼 이어짐)"}
   },
   "runOptions": {
-    "parallel": {"type": "number", "default": 2, "label": "whisper-cli 동시 실행 수(결과는 같음. GPU를 더 쓴다, 프로세스마다 VRAM 약 1.5GB)"}
+    "parallel": {"type": "auto-count", "default": "auto", "label": "whisper-cli 동시 실행 수: auto = 처리량·VRAM·GPU·CPU·메모리를 재 자동으로 늘리고 줄임, 수 = 고정(결과는 같음. 프로세스마다 VRAM 약 1.2~1.5GB)."},
+    "parallelMax": {"type": "number", "default": 0, "label": "자동일 때 상한(0 = VRAM 여유로 계산, 최대 8)"},
+    "yield": {"type": "bool", "default": true, "label": "자동일 때 다른 프로그램이 GPU를 30% 넘게 쓰면 하나씩 줄이기"}
   }
 }

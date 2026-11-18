@@ -166,7 +166,7 @@ class TranscribeTests(unittest.TestCase):
         self.assertEqual(P.read(p, 2, root), {**SETTINGS, "useGpu": False, "threads": 8})   # seed 2 = CPU만
         # parallel은 실행 옵션: 설정·설정 버전에 없고, 기본값·CPU 설정으로 찾으면 씨앗 그대로(새 설정 버전을 쓰지 않음)
         self.assertNotIn("parallel", SETTINGS)
-        self.assertEqual(P.run_defaults(p), {"parallel": 2})
+        self.assertEqual(P.run_defaults(p), {"parallel": "auto", "parallelMax": 0, "yield": True})   # 2026-11-18: 기본 자동
         self.assertEqual((P.find_or_write(p, P.defaults(p), root), P.find_or_write(p, {"useGpu": False, "threads": 8}, root)), (1, 2))
         self.assertEqual(P.versions(p, root), [1, 2])
 
@@ -178,7 +178,7 @@ class TranscribeTests(unittest.TestCase):
         self.assertEqual((T.split_names([], 2), T.split_names(names, 0), T.split_names(names, None)), ([], [names], [names]))
 
     def test_parallel_same_result_and_stats(self):
-        """parallel 2: 조각을 작업자마다 번갈아 나눠 whisper-cli 두 개, 다시 돌리기도. 구간은 parallel 1과 같고 stats.parallel만 다르다"""
+        """parallel 2: 공유 대기열에서 조각 수 ÷ 2씩 whisper-cli 두 개, 다시 돌리기도. 구간은 parallel 1과 같고 stats.parallel·workers만 다르다"""
         bad = " ".join(["데스라인 벤션 2차 강화입니다."] * 10)
         self.texts = {("c0000.wav", False): "안녕하세요", ("c0001.wav", False): bad, ("c0001.wav", True): "버스 안내 방송",
                       ("c0002.wav", False): "끝"}
@@ -187,18 +187,21 @@ class TranscribeTests(unittest.TestCase):
         self.calls.clear()
         two, s2, prog = self.run_it({"parallel": 2})
         files = lambda cmd: [cmd[i + 1] for i, a in enumerate(cmd) if a == "-f"]
-        self.assertEqual(sorted(map(files, self.calls[:2])), [["c0000.wav", "c0002.wav"], ["c0001.wav"]])   # 첫 전사: 작업자 2개
+        self.assertEqual(sorted(map(files, self.calls[:2])), [["c0000.wav", "c0001.wav"], ["c0002.wav"]])   # 첫 전사: 작업자 2개(묶음 2·1)
         self.assertEqual(files(self.calls[2]), ["c0001.wav"])                                               # 다시 돌리기: 조각 하나라 하나
         self.assertEqual(one, two)
         self.assertEqual((s1["parallel"], s2["parallel"]), (1, 2))
-        same = lambda st: {k: v for k, v in st.items() if k not in ("parallel", "passSec", "whisper")}
+        same = lambda st: {k: v for k, v in st.items() if k not in ("parallel", "passSec", "whisper", "workers")}
+        self.assertEqual((s1["workers"]["max"], s2["workers"]["max"], s2["workers"]["retry"]["max"]), (1, 2, 2))
         self.assertEqual(same(s1), same(s2))
         self.assertEqual(s2["whisper"]["encode"], {"ms": 301.5, "runs": 6})   # 실행 세 번을 더함
         self.assertEqual(s2["whisper"]["vad"]["ms"], 400.0)                   # 실행마다 마지막 값: 작업자 0(조각 2개) 200 + 작업자 1 100 + 다시 100
+        self.assertTrue(all(p["text"].endswith(" · 작업자 2") and p["workers"] == 2 for p in prog))
         pct = [p["percent"] for p in prog]
         self.assertEqual(pct, sorted(pct))                                    # 진행은 줄지 않는다
-        self.assertEqual((prog[-1]["percent"], prog[-1]["text"]), (100, "끝"))
-        self.assertEqual(sorted(p["text"] for p in prog if p["text"].startswith("조각 ") and p["text"] != "조각 0/3"), ["조각 1/3", "조각 2/3", "조각 3/3"])
+        texts = [p["text"].removesuffix(" · 작업자 2") for p in prog]
+        self.assertEqual((prog[-1]["percent"], texts[-1]), (100, "끝"))
+        self.assertEqual(sorted(t for t in texts if t.startswith("조각 ") and t != "조각 0/3"), ["조각 1/3", "조각 2/3", "조각 3/3"])
 
     def test_parallel_progress_counts_running_workers(self):
         """진행도 = 시작한 조각 수 - 지금 조각을 돌고 있는 작업자 수(줄지 않음)"""
@@ -220,7 +223,7 @@ class TranscribeTests(unittest.TestCase):
         self.assertEqual((len(self.calls), stats["parallel"]), (1, 1))
 
     def test_parallel_failure_kills_others(self):
-        self.hang_on, self.fail_on = {"c0000.wav"}, {"c0001.wav"}   # 작업자 0은 죽일 때까지 돌고, 작업자 1이 실패
+        self.hang_on, self.fail_on = {"c0000.wav"}, {"c0002.wav"}   # 작업자 0(c0000·c0001)은 죽일 때까지 돌고, 작업자 1(c0002)이 실패
         with self.assertRaises(SystemExit) as e, redirect_stdout(io.StringIO()):
             T.transcribe(self.wav, self.work, {**SETTINGS, "vadEngine": "whisper"}, False, self.tools, None, {"parallel": 2})
         self.assertIn("whisper 실패", str(e.exception.code))
