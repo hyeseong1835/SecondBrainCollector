@@ -7,7 +7,7 @@
   python analyze.py --source phone --limit 2 --dry-run
   python analyze.py --redo          # 이미 분석한 것도 다시
   python analyze.py --redo --redo-from whisper-cpp@1#1 --pipeline whisper-cpp@2   # 그 파이프라인 항목(여러 번 줄 수 있음)의 결과가 있는 묶음만 다시(데스크톱 전체 재전사)
-  python analyze.py --source phone --pick 20261111-140200.m4a   # 그 파일이 든 묶음 하나(이미 분석했어도 다시)
+  python analyze.py --source phone --pick 20261111-140200.m4a   # 그 파일이 든 묶음 하나(이미 분석했어도 다시). --pick을 여러 번 주면 그 묶음들
   python analyze.py --call 20261111-224007-ab12cd34.m4a   # 그 파일이 든 디스코드 통화(디스코드 일반 녹음+노트북 마이크)의 미전사 묶음 전부(--redo면 전부)
   python analyze.py --progress-json # 사람이 읽는 줄 사이에 "@@progress {json}" 줄(데스크톱 녹음 화면이 읽음)
     전사 중에는 파이프라인이 낸 진행(pipelines.py 머리말)을 이어 받아 {"event":"step","stage":"transcribe","file":k,"files":n,"percent":0~100,"text":"…"}(percent·text는 있을 때만, 초당 4번까지)
@@ -15,6 +15,14 @@
   예상 시간(2026-11-17, eta.py): plan·start·step·done·error 줄에 "eta": {remainingSec, fileRemainingSec, endsAt, filesDone, filesTotal, audioDoneSec, audioTotalSec, …}
     (남은 시간 = 남은 파일마다 a × 오디오 초 + b, a·b는 이 PC 기록(파이프라인·설정 버전·실행 옵션별)과 이번 실행의 끝난 파일로 맞춤. 표본이 모자라면 null = 계산 중)
 
+겹치기 실행(2026-11-18, run_flow): 묶음마다 준비(wav·단어장) → 전사(GPU) → 마무리(이름 붙이기·목소리 대조·요약·올리기)를 갈래로 겹친다.
+  전사는 묶음 여러 개를 한 무리(조각 추정 GROUP_CHUNKS개·파일 GROUP_FILES개까지, 묶음은 나누지 않음)로: 여러 입력 파이프라인(multiInput)이면 무리의 파일 모두를
+  파이프라인 한 번(모델 올리기·작업자 풀 한 번)에, 아니면 파일마다 차례로. 화자 분리(sherpa)는 준비가 끝나면 바로 다른 프로세스(DIAR_WORKERS개)에서 돌린다.
+  마무리는 묶음 차례대로 하나씩(결과·목소리 저장소·올리기 차례가 전과 같다). 한 묶음이 실패해도 나머지는 계속, 무리 호출이 통째로 실패하면 묶음마다 다시.
+  단어장 고르기는 실행 안에서 같은 본문이면 한 번만 묻는다(PICKS). --stage all(요약)이면 llama-server와 GPU를 나누지 않게 무리 사이를 겹치지 않는다.
+  진행 줄: start {i, last, bundles, files = 무리의 파일 수, …}(무리 하나에 한 번), step transcribe에 groupFiles(무리 파일 수. 여러 입력이면 file = files = 1이고 percent가 무리 전체),
+  done은 묶음 차례대로. 앞 무리 마무리가 다음 무리 전사와 겹치므로 done이 start보다 늦게 올 수 있다. eta는 eta.py Flow(무리마다 처리량 표본, fileRemainingSec = 지금 무리).
+  중단(Ctrl+C·오류)이면 갈래를 멈추고 돌고 있는 파이프라인·whisper-cli·화자 분리 프로세스를 끝내고 임시 폴더를 지운다(데스크톱 취소는 작업 개체째 끝냄).
 동시 실행 막기(runlock.py): %USERPROFILE%/.secondbrain/analysis/analyze.lock + 명령줄에 analyze.py가 든 다른 python 프로세스. 이미 돌고 있으면 종료 코드 3.
 전사 대기열(2026-11-12): 데스크톱 녹음 화면이 %USERPROFILE%/.secondbrain/analysis/queue.json(2026-11-14 옮김)에 쌓아 두고 차례로 이 스크립트를 띄운다.
   묶음을 정하면 잠금 파일에 "plan"(이번 실행이 처리할 묶음 키 "<출처>/<첫 파일 이름>" 목록)을 적어, 대기열이 같은 묶음을 두 번 넣지 않게 한다.
@@ -58,7 +66,7 @@ API: %USERPROFILE%/.secondbrain/api.json(없으면 옛 %LOCALAPPDATA%/SecondBrai
   python analyze.py --source phone --pick X.m4a --asr-model large-v3-turbo --dry-run
 단계(--stage, 2026-11-11): transcribe(기본) = 전사·화자 구분만 올린다(요약 비움). all = 예전처럼 전사하고 바로 요약
 """
-import argparse, datetime as dt, json, os, re, subprocess, sys, tempfile, time, urllib.parse, urllib.request
+import argparse, datetime as dt, json, os, re, subprocess, sys, tempfile, threading, time, urllib.parse, urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -260,18 +268,20 @@ def workers_line(w) -> str | None:
         return None
 
 
-def transcribe_reporter(file: int, files: int):
-    """파이프라인 진행을 --progress-json step 이벤트로 넘기는 함수(파일마다 새로, 초당 4번까지). --progress-json이 아니면 None"""
+def transcribe_reporter(file: int, files: int, **extra):
+    """파이프라인 진행을 --progress-json step 이벤트로 넘기는 함수(파일마다 새로, 초당 4번까지). --progress-json이 아니면 None.
+    extra = step 줄에 더할 칸(겹치기 실행의 groupFiles = 지금 전사하는 무리의 파일 수)"""
     if not PROGRESS: return None
     gate = P.Throttle()
 
     def report(ev):
         if ETA and ev.get("workers"): ETA.workers(ev["workers"])   # 거르기 전에(작업자 수 변화를 놓치지 않게)
-        if gate.ok(): progress("step", stage="transcribe", file=file, files=files, **ev)
+        if gate.ok(): progress("step", stage="transcribe", file=file, files=files, **extra, **ev)
     return report
 
 
 VOCAB_OFF = False   # 단어장 고르기가 한 번 실패하면 이번 실행은 힌트 없이(묶음마다 경고하지 않게)
+PICKS = {}          # 이번 실행의 단어장 고르기(본문 JSON → 응답, 2026-11-18). 폰 녹음은 묶음마다 본문이 같아 한 번만 묻는다(겹치기 실행에서 준비가 전사 앞을 막지 않게)
 
 
 def pick_body(b: "B.Bundle", settings: dict) -> dict:
@@ -296,7 +306,10 @@ def bundle_hints(call, b: "B.Bundle", tmp: Path) -> Path | None:
     global VOCAB_OFF
     if VOCAB_OFF or not P.wants_hints(CHOSEN.pipe, CHOSEN.settings): return None
     try:
-        h = hints_file(call("POST", "/api/vocab/pick", pick_body(b, CHOSEN.settings)) or {})
+        body = pick_body(b, CHOSEN.settings)
+        k = json.dumps(body, sort_keys=True, ensure_ascii=False)
+        if k not in PICKS: PICKS[k] = call("POST", "/api/vocab/pick", body) or {}
+        h = hints_file(PICKS[k])
     except Exception as e:
         VOCAB_OFF = True
         print(f"  단어장을 읽지 못해 이번 실행은 힌트 없이 전사합니다: {str(e)[-200:]}", file=sys.stderr)
@@ -348,14 +361,15 @@ class Llm:
 SPEAKER_SOURCES = ("phone", "call", "laptop-mic", "discord-output")   # 화자 구분(speakers.py)을 하는 원천. 전사를 단어 단위로 받는다
 
 
-def assign_speakers(source: str, f: Path, wav: Path, words: list, state: dict, rel: str | None = None, at: str | None = None):
+def assign_speakers(source: str, f: Path, wav: Path, words: list, state: dict, rel: str | None = None, at: str | None = None, diar: tuple | None = None):
     """단어 구간(transcribe(words=True))에 화자를 붙이고 화자·틈 단위로 다시 묶는다. 통화는 나·상대 이름, 폰 녹음은 나·화자1·화자2….
     사람 목소리(speakers.apply_voices, 2026-11-16): 통화면 상대 목소리를 이 PC에 등록, 대면 녹음이면 화자N에 등록된 이름(덜 닮으면 구간 speakerGuess).
-    state["save"]가 False(dry-run)면 목소리 저장소를 바꾸지 않는다. sherpa-onnx나 모델이 없으면 화자 없이 묶기만 한다. → (구간들, 통화 상대 이름 또는 None)"""
+    state["save"]가 False(dry-run)면 목소리 저장소를 바꾸지 않는다. sherpa-onnx나 모델이 없으면 화자 없이 묶기만 한다. → (구간들, 통화 상대 이름 또는 None)
+    diar = 미리 해 둔 화자 분리 (turns, embs)(겹치기 실행의 화자 분리 갈래, 같은 wav의 Diarizer.diarize 결과). 없으면 여기서 한다"""
     import speakers as sp   # numpy만 쓴다. sherpa-onnx는 Diarizer가 부를 때
     partner = sp.call_partner(f) if source == "call" else None
     if words and speaker_state(state):
-        turns, embs = state["d"].diarize(sp.load_wav(wav))   # 화자 수는 정하지 않는다(잘게 나눈 뒤 name_clusters가 합친다)
+        turns, embs = diar if diar is not None else state["d"].diarize(sp.load_wav(wav))   # 화자 수는 정하지 않는다(잘게 나눈 뒤 name_clusters가 합친다)
         no_me = source in sp.NO_ME_SOURCES   # 디스코드 출력: 내 목소리가 없다 → '나' 후보 없이 화자N만
         names, guessed = sp.name_clusters(embs, None if no_me else state["me"], turns, partner), set()
         if state["me"] is not None or no_me:   # '나'를 못 가르면 상대 목소리도 못 고른다
@@ -520,22 +534,132 @@ def join_wavs(b: "B.Bundle", wavs: list, dst: Path) -> Path:
     return dst
 
 
-def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_summary_chars: int, hints: Path | None = None, used: set | None = None):
-    """묶음 하나를 전사·화자 구분(llm이 있으면 요약까지). → API 본문(segments 포함). hints = 단어장 힌트 파일(묶음 파일마다 같은 것), used = 쓴 단어장 id를 모을 집합
+# ---- 겹치기 실행(2026-11-18, run_flow) ----
+# 묶음마다 준비(wav 만들기·단어장 고르기, CPU) → 전사(GPU) → 마무리(화자 구분·요약·올리기, CPU)를 세 갈래로 겹친다:
+# 무리 g를 전사하는 동안 무리 g+1을 준비하고 무리 g-1을 마무리한다. 전사는 묶음 여러 개(무리)를 한 번에: 파이프라인이 여러 입력(multiInput)을 받으면
+# 무리의 모든 파일을 한 호출(모델 올리기·작업자 풀 한 번)로, 아니면 파일마다 차례로. 마무리는 묶음 차례대로 하나씩(목소리 저장소·올리기 차례가 전과 같게).
+# 결과: 파일마다 구간은 하나씩 돌린 것과 같다(파이프라인 약속). 다른 점은 단어장 고르기가 앞 묶음의 "쓰인 횟수 올리기"보다 먼저 될 수 있는 것뿐(같은 점수의 순서만 바뀔 수 있음).
+GROUP_CHUNKS = 48   # 무리 하나의 30초 조각 수 목표(파일마다 올림한 추정). 작업자 풀이 묶음을 나눠 가질 만큼 크고, 겹치기가 잘게 돌 만큼 작게
+GROUP_FILES = 64    # 무리 하나의 파일 수 상한
+PREP_AHEAD = 1      # 전사 중인 무리 뒤에 미리 준비해 두는 무리 수(wav가 임시 폴더에 쌓이는 양)
+WAV_THREADS = 4     # 묶음 안 파일들의 wav를 동시에 만드는 ffmpeg 수
+# 화자 분리(sherpa, CPU)는 오디오만 보므로 준비가 끝나면 바로 화자 분리 갈래에서 돌린다(GPU 전사와 겹침). 마무리는 그 결과로 이름 붙이기·목소리 대조만.
+# 갈래 수 = 논리 코어 ÷ 6(1~3, Diarizer 하나가 스레드 4개, whisper-cli도 CPU를 쓴다). 갈래는 프로세스(speakers.diarize_path: sherpa-onnx가 GIL을 놓지 않아
+# 스레드면 다른 갈래가 멈췄다, 2026-11-18 실측)이고 프로세스마다 Diarizer 하나(같은 모델·설정이라 결과는 같다, 실측으로 확인).
+DIAR_WORKERS = max(1, min(3, (os.cpu_count() or 4) // 6))
+
+
+def est_chunks(sec: float) -> int:
+    return max(1, -(-int(sec) // 30))
+
+
+def make_groups(jobs: list, audio: list) -> list:
+    """묶음들 → 무리들 [[묶음 번호(0부터)…]]. 차례대로 조각 수 추정 합이 GROUP_CHUNKS나 파일 수가 GROUP_FILES를 넘기 전까지 담는다(묶음은 나누지 않음)"""
+    groups, cur, chunks, files = [], [], 0, 0
+    for i, b in enumerate(jobs):
+        c, f = sum(est_chunks(x) for x in audio[i]), len(b.items)
+        if cur and (chunks + c > GROUP_CHUNKS or files + f > GROUP_FILES):
+            groups.append(cur); cur, chunks, files = [], 0, 0
+        cur.append(i); chunks += c; files += f
+    if cur: groups.append(cur)
+    return groups
+
+
+@dataclass
+class Job:
+    """겹치기 실행에서 묶음 하나(i = 0부터, g = 무리 번호)"""
+    i: int
+    b: "B.Bundle"
+    g: int = 0
+    tmp: object = None            # tempfile.TemporaryDirectory
+    hints: Path | None = None
+    wavs: list = field(default_factory=list)
+    parts: list | None = None     # 파일마다 구간들(전사 결과, 묶음 오프셋 전)
+    used: set = field(default_factory=set)
+    error: BaseException | None = None
+    t0: float = 0.0
+    diar: tuple | None = None     # 화자 분리 갈래: (묶음 wav, Future → (turns, embs))
+
+    @property
+    def dir(self) -> Path:
+        return Path(self.tmp.name)
+
+    def words(self) -> bool:
+        return self.b.source in SPEAKER_SOURCES
+
+    def close(self):
+        if self.tmp is not None: self.tmp.cleanup(); self.tmp = None
+
+
+def prep_job(j: Job, call):
+    """준비: 임시 폴더, 단어장 힌트, 파일마다 16kHz wav(동시에 WAV_THREADS개). 실패하면 j.error(그 묶음만)"""
+    from concurrent.futures import ThreadPoolExecutor
+    j.t0 = time.time()
+    j.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)   # 백신·색인기가 임시 파일을 잡고 있어도 멈추지 않게
+    try:
+        j.hints = bundle_hints(call, j.b, j.dir)
+        j.wavs = [j.dir / f"p{k}.wav" for k in range(len(j.b.items))]
+        with ThreadPoolExecutor(min(WAV_THREADS, len(j.wavs)) or 1) as ex:
+            ms = list(ex.map(lambda k: to_wav(j.b.items[k].path, j.wavs[k]), range(len(j.wavs))))
+        if ETA:
+            for k, x in enumerate(ms): ETA.audio(j.i, k, x / 1000)
+    except Exception as e:
+        j.error = e
+
+
+def transcribe_group(js: list, tmp: Path, tag: str = "g"):
+    """무리 전사: 여러 입력 파이프라인이면 무리의 모든 파일을 한 호출로(P.run_many), 아니면 파일마다 transcribe(). 결과는 j.parts, 실패는 j.error(그 묶음만).
+    한 호출이 통째로 실패하면(whisper-cli 실패 등) 묶음마다 따로 다시 돌려 실패를 그 묶음에 가둔다."""
+    live = [j for j in js if j.error is None]
+    if not live: return
+    files = sum(len(j.wavs) for j in live)
+    if not CHOSEN.pipe.multi:
+        n = 0
+        for j in live:
+            try:
+                parts = []
+                for wav in j.wavs:
+                    n += 1
+                    progress("step", stage="transcribe", file=n, files=files, groupFiles=files)
+                    parts.append(transcribe(wav, j.dir, words=j.words(), hints=j.hints, used=j.used, on_progress=transcribe_reporter(n, files, groupFiles=files)))
+                j.parts = parts
+            except Exception as e:
+                j.error = e
+        return
+    items = [(j, k) for j in live for k in range(len(j.wavs))]
+    progress("step", stage="transcribe", file=1, files=1, groupFiles=files)
+    try:
+        res = P.run_many(CHOSEN.pipe, CHOSEN.settings, [{"wav": j.wavs[k], "words": j.words(), "hints": j.hints} for j, k in items], tmp, tools=A,
+                         on_progress=transcribe_reporter(1, 1, groupFiles=files), run_options=CHOSEN.run_options, tag=tag)
+    except RuntimeError as e:
+        if len(live) == 1:
+            live[0].error = e; return
+        print(f"  전사 무리(묶음 {len(live)}개) 실패 → 묶음마다 다시: {str(e)[-200:]}", file=sys.stderr, flush=True)
+        for k, j in enumerate(live): transcribe_group([j], tmp, f"{tag}-{k}")
+        return
+    parts, line = {}, None
+    for (j, k), r in zip(items, res):
+        if isinstance(r, Exception):
+            j.error = j.error or r; continue
+        segs, used, stats = r
+        j.used |= used
+        parts.setdefault(j.i, [None] * len(j.wavs))[k] = segs
+        line = line or workers_line(stats.get("workers"))
+    for j in live:
+        if j.error is None: j.parts = parts[j.i]
+    if line: print(f"  무리 파일 {files}개: {line}", file=sys.stderr, flush=True)
+
+
+def finish_bundle(b: "B.Bundle", wavs: list, parts: list, llm: "Llm | None", spk: dict, min_summary_chars: int, announce: bool = True, diar=None):
+    """마무리: 파일마다 구간(parts)을 묶음 시각으로 옮기고 화자 구분(llm이 있으면 요약까지). → API 본문(segments 포함).
     전사는 파일마다 하고 시각에 오프셋을 더한다: 무음을 채워 이어 붙인 긴 wav를 whisper.cpp VAD로 돌리면 구간 시각이 수백 초씩 어긋났다(2026-11-11 실측).
-    녹음은 5초 무음 뒤에만 파일을 끊으므로 경계에서 말이 잘리는 일은 드물다. 화자 구분(sherpa)과 요약은 묶음 전체로 한 번에."""
+    녹음은 5초 무음 뒤에만 파일을 끊으므로 경계에서 말이 잘리는 일은 드물다. 화자 구분(sherpa)과 요약은 묶음 전체로 한 번에.
+    announce = 화자 구분·요약 step 줄을 낼까(겹치기 실행에서 다른 무리를 전사하는 동안은 내지 않는다: 데스크톱 단계가 전사로 남게)
+    diar = 화자 분리 갈래의 (묶음 wav, Future → (turns, embs)). 실패했거나 없으면 여기서 화자 분리를 한다"""
     source, first = b.source, b.items[0]
     words_mode = source in SPEAKER_SOURCES
-    wavs, segs, partner = [], [], None
-    for k, it in enumerate(b.items):
-        if ETA: ETA.start_file(k)
-        progress("step", stage="transcribe", file=k + 1, files=len(b.items))
-        wav = tmp / f"p{k}.wav"
-        ms = to_wav(it.path, wav)
-        if ETA: ETA.file_audio(ms / 1000)
-        wavs.append(wav)
-        part = transcribe(wav, tmp, words=words_mode, hints=hints, used=used, on_progress=transcribe_reporter(k + 1, len(b.items)))
-        if ETA: ETA.end_file()
+    segs, partner = [], None
+    for it, part in zip(b.items, parts):
         off = it.start - b.start
         for s in part:
             s["startMs"] += off; s["endMs"] += off
@@ -543,11 +667,18 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
         segs += part
     segs.sort(key=lambda s: (s["startMs"], s["endMs"]))
     if words_mode:
-        progress("step", stage="speakers")
-        whole = wavs[0] if len(wavs) == 1 else join_wavs(b, wavs, tmp / "bundle.wav")
-        segs, partner = assign_speakers(source, first.path, whole, segs, spk, rel=first.rel, at=iso(b.start))
+        if announce: progress("step", stage="speakers")
+        pre, whole = None, None
+        if diar is not None:
+            whole, fut = diar
+            try:
+                pre = fut.result()
+            except Exception as e:
+                print("  화자 분리 갈래 실패, 여기서 다시:", e)
+        if whole is None: whole = bundle_wav(b, wavs)
+        segs, partner = assign_speakers(source, first.path, whole, segs, spk, rel=first.rel, at=iso(b.start), diar=pre)
     elif source == "discord-bot":
-        progress("step", stage="speakers")
+        if announce: progress("step", stage="speakers")
         enroll_bot_voices(b, wavs, spk)
     transcript = " ".join(s["text"] for s in segs)
     speech = sum(s["endMs"] - s["startMs"] for s in segs)
@@ -564,7 +695,7 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
         context = (context + ". " if context else "") + f"녹음 파일 {len(b.items)}개를 시간순으로 이어 붙인 것"
     summary = None
     if llm is not None and len(transcript) >= min_summary_chars and LLM_MODEL.exists():
-        progress("step", stage="summary")
+        if announce: progress("step", stage="summary")
         summary = llm.summarize(labeled(segs) if any(s["speaker"] for s in segs) else transcript, context)
     if partner and summary:
         summary = f"통화 상대: {partner}\n{summary}"
@@ -574,17 +705,151 @@ def analyze_bundle(b: "B.Bundle", tmp: Path, llm: "Llm | None", spk: dict, min_s
             "speechMs": speech, "transcript": transcript, "summary": summary, "segments": segs, "files": files}
 
 
+def bundle_wav(b: "B.Bundle", wavs: list) -> Path:
+    """화자 분리에 넣는 묶음 wav: 파일 하나면 그대로, 여럿이면 간격을 무음으로 채워 이어 붙인 것(같은 임시 폴더의 bundle.wav)"""
+    return wavs[0] if len(wavs) == 1 else join_wavs(b, wavs, wavs[0].parent / "bundle.wav")
+
+
+def diar_fn():
+    """화자 분리 갈래에서 부를 함수(다른 프로세스에서 불러 쓸 수 있게 모듈 함수). 시험이 바꿔 끼운다"""
+    import speakers as sp
+    return sp.diarize_path
+
+
+def make_diar_pool():
+    from concurrent.futures import ProcessPoolExecutor
+    return ProcessPoolExecutor(DIAR_WORKERS)
+
+
+def stop_pool(pool, cancel: bool):
+    """화자 분리 갈래 끝내기. cancel(중단·오류)이면 도는 프로세스를 바로 죽이고, 아니면 끝나기를 기다린다"""
+    if pool is None: return
+    if not cancel: pool.shutdown(wait=True); return
+    pool.shutdown(wait=False, cancel_futures=True)
+    kill = getattr(pool, "kill_workers", None)   # 파이썬 3.14+
+    if kill:
+        try: kill()
+        except Exception: pass
+    else:
+        for proc in list((getattr(pool, "_processes", None) or {}).values()):
+            try: proc.kill()
+            except Exception: pass
+
+
+def run_flow(jobs: list, call, overlap: bool = True):
+    """준비·전사·마무리 세 갈래를 돌리며 묶음을 차례대로 내준다(제너레이터: 마무리할 Job을 묶음 차례로 yield).
+    받는 쪽(run_jobs)이 j.parts로 마무리하고 다음을 받는다. overlap = False면 앞 무리 마무리가 끝나야 다음 무리를 전사한다(요약 llama-server와 GPU를 같이 쓰지 않게).
+    받는 쪽이 멈추면(예외·취소) 갈래를 멈추고 돌고 있는 파이프라인을 트리째 끝낸다. 갈래 안의 예상 못 한 오류는 받는 쪽에서 다시 던진다."""
+    import queue
+    groups = make_groups(jobs, plan_audio(jobs))
+    stop = threading.Event()
+    ready, done_q = queue.Queue(maxsize=PREP_AHEAD), queue.Queue()
+    gate = None if overlap else threading.Semaphore(1)
+    made = []   # 준비한 Job(끝에 임시 폴더를 지운다)
+    diar = {"pool": None, "on": speakers_ready()}   # 화자 분리 갈래(처음 쓸 때 띄움)
+    state = {"transcribing": True}
+
+    def put(q, x) -> bool:
+        while not stop.is_set():
+            try:
+                q.put(x, timeout=0.5); return True
+            except queue.Full:
+                pass
+        return False
+
+    def prep():
+        try:
+            for g, ix in enumerate(groups):
+                js = []
+                for i in ix:
+                    if stop.is_set(): return
+                    j = Job(i, jobs[i], g); made.append(j); prep_job(j, call); js.append(j)
+                    if diar["on"] and j.error is None and j.words() and not stop.is_set():
+                        try:
+                            diar["pool"] = diar["pool"] or make_diar_pool()
+                            whole = bundle_wav(j.b, j.wavs)
+                            j.diar = (whole, diar["pool"].submit(diar_fn(), str(whole)))
+                        except Exception as e:   # 갈래를 못 쓰면 마무리에서 예전처럼
+                            print("  화자 분리 갈래 안 씀:", e, file=sys.stderr, flush=True); diar["on"] = False
+                if not put(ready, js): return
+            put(ready, None)
+        except BaseException as e:
+            done_q.put(e)
+
+    def trans():
+        try:
+            while not stop.is_set():
+                try:
+                    js = ready.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if js is None: break
+                if gate:
+                    while not gate.acquire(timeout=0.5):
+                        if stop.is_set(): return
+                ix = [j.i for j in js]
+                if ETA: ETA.start_group(ix)
+                b0, b1 = js[0].b, js[-1].b
+                progress("start", i=ix[0] + 1, last=ix[-1] + 1, total=len(jobs), bundles=len(js), source=b0.source, first=Path(b0.items[0].rel).name,
+                         start=iso(b0.start), end=iso(b1.end), files=sum(len(j.b.items) for j in js))
+                with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as gt:
+                    transcribe_group(js, Path(gt), f"g{js[0].g}")
+                if ETA: ETA.end_transcribe()
+                if js[0].g == len(groups) - 1: state["transcribing"] = False
+                for j in js: done_q.put(j)
+        except BaseException as e:
+            done_q.put(e)
+
+    threads = [threading.Thread(target=prep, daemon=True, name="prep"), threading.Thread(target=trans, daemon=True, name="transcribe")]
+    for t in threads: t.start()
+    finished = False
+    try:
+        for n in range(len(jobs)):
+            x = done_q.get()
+            if isinstance(x, BaseException): raise x
+            yield x, not state["transcribing"]
+            x.close()
+            if gate and (n + 1 == len(jobs) or x.g != jobs_group(groups, n + 1)): gate.release()
+        finished = True
+    finally:
+        stop.set()
+        P.kill_all()
+        for t in threads: t.join(timeout=10)
+        stop_pool(diar["pool"], cancel=not finished)   # 화자 분리 프로세스가 끝나야 임시 wav를 지울 수 있다
+        for j in made: j.close()
+
+
+def speakers_ready() -> bool:
+    """화자 분리 갈래를 쓸 수 있나(sherpa-onnx와 모델이 있나). 없으면 마무리에서 예전처럼(화자 없이)"""
+    try:
+        import speakers as sp, sherpa_onnx  # noqa: F401
+        return all(Path(x).exists() for x in (sp.SEG_MODEL, sp.EMB_MODEL))
+    except Exception:
+        return False
+
+
+def jobs_group(groups: list, i: int) -> int:
+    """묶음 번호 i(0부터)가 든 무리 번호"""
+    for g, ix in enumerate(groups):
+        if i in ix: return g
+    return -1
+
+
 PROGRESS = False
 ETA: "E.Eta | None" = None   # 이번 실행의 예상 시간(run_jobs가 묶음을 정한 뒤 만든다)
 ETA_EVENTS = ("plan", "start", "step", "done", "error")
 
 
+PRINT_LOCK = threading.Lock()   # 겹치기 실행: 준비·전사·마무리 갈래가 같이 진행 줄을 낸다
+
+
 def progress(event: str, **kw):
     """--progress-json이면 기계가 읽는 진행 한 줄. 사람이 읽는 줄과 섞여 나오므로 접두어로 가른다. 실행 중이면 eta(eta.py)를 붙인다."""
     if PROGRESS:
-        if ETA and event in ETA_EVENTS:
-            kw["eta"] = ETA.snapshot(kw.get("percent"), transcribing=kw.get("stage", "transcribe") == "transcribe")
-        print("@@progress " + json.dumps({"event": event, **kw}, ensure_ascii=False), flush=True)
+        with PRINT_LOCK:
+            if ETA and event in ETA_EVENTS:
+                kw["eta"] = ETA.snapshot(kw.get("percent"), transcribing=kw.get("stage", "transcribe") == "transcribe", file=kw.get("file"), files=kw.get("files"))
+            print("@@progress " + json.dumps({"event": event, **kw}, ensure_ascii=False), flush=True)
 
 
 def plan_audio(jobs: list) -> list:
@@ -613,7 +878,7 @@ def main():
     ap.add_argument("--stage", choices=("transcribe", "all"), default="transcribe", help="transcribe = 전사·화자 구분만(기본), all = 요약까지")
     ap.add_argument("--min-summary-chars", type=int, default=60)
     ap.add_argument("--source", choices=list(SOURCES), help="이 원천 폴더만(예: phone)")
-    ap.add_argument("--pick", help="--source 안에서 이 파일 이름이 든 묶음 하나만(이미 분석했어도 다시)")
+    ap.add_argument("--pick", action="append", help="--source 안에서 이 파일 이름이 든 묶음 하나만(이미 분석했어도 다시). 여러 번 주면 그 묶음들(2026-11-18)")
     ap.add_argument("--call", help="이 파일 이름이 든 디스코드 통화(callSources 묶음들)의 미전사 묶음 전부(--redo면 전부)")
     ap.add_argument("--pipeline", help=f"전사 파이프라인 <이름>@<버전>(--list-pipelines). 없으면 {LEGACY_PIPELINE}(전사 모델 = --asr-model → settings.json)")
     ap.add_argument("--settings-version", type=int, help="파이프라인 설정 버전(없으면 최신)")
@@ -746,7 +1011,7 @@ def run(a):
         if not (ROOT / folder).exists(): continue
         bundles = B.make_bundles(scan(folder), rule)
         if target or a.pick:
-            hit = lambda it: Path(it.path).resolve() == target if target else Path(it.rel).name == a.pick
+            hit = lambda it: Path(it.path).resolve() == target if target else Path(it.rel).name in a.pick
             for b in bundles:
                 if not any(hit(it) for it in b.items): continue
                 if B.in_progress(b, now, rule):
@@ -771,8 +1036,8 @@ def run(a):
             else: jobs.append(b)
     if a.limit: jobs = jobs[:a.limit]
     if (target or a.pick) and not jobs and not n_done:
-        progress("missing", file=a.file or a.pick, source=a.source)
-        print("그 파일이 든 묶음을 찾지 못했습니다(이 PC의 녹음 폴더에 파일이 없음):", a.file or f"{a.source}/{a.pick}")
+        progress("missing", file=a.file or ", ".join(a.pick), source=a.source)
+        print("그 파일이 든 묶음을 찾지 못했습니다(이 PC의 녹음 폴더에 파일이 없음):", a.file or f"{a.source}/{', '.join(a.pick)}")
     return run_jobs(a, call, jobs, n_done, n_progress)
 
 
@@ -830,14 +1095,16 @@ def run_jobs(a, call, jobs, n_done, n_progress):
     global ETA
     if CHOSEN: print("전사 파이프라인:", CHOSEN.label())
     print(("전사만 합니다(요약 안 함). " if a.stage == "transcribe" else "") + f"분석할 묶음 {len(jobs)}개(파일 {sum(len(b.items) for b in jobs)}개) · 이미 분석 {n_done} · 진행 중이라 건너뜀 {n_progress}")
+    groups = make_groups(jobs, plan_audio(jobs)) if jobs else []
     if not a.plan:
         runlock.set_plan([bundle_key(b) for b in jobs])
-        if jobs: ETA = E.Eta(plan_audio(jobs), E.key(CHOSEN.ref(), CHOSEN.run_options))
+        if jobs: ETA = E.Flow(plan_audio(jobs), flow_key(), groups)
         progress("plan", total=len(jobs), files=sum(len(b.items) for b in jobs), done=n_done, inProgress=n_progress, dryRun=a.dry_run, stage=a.stage,
-                 pipeline=CHOSEN.ref(), asrModel=CHOSEN.settings.get("asrModel"))
+                 pipeline=CHOSEN.ref(), asrModel=CHOSEN.settings.get("asrModel"), groups=len(groups), multiInput=CHOSEN.pipe.multi)
     if a.plan or not jobs:
         if not a.plan: progress("end", analyzed=0, total=0)
         return
+    if len(groups) < len(jobs): print(f"전사 무리 {len(groups)}개(" + ("여러 입력: 무리마다 파이프라인 한 번" if CHOSEN.pipe.multi else "파일마다 차례로") + ", 준비·화자 구분·올리기와 겹침)")
     if not a.dry_run:
         try:   # 결과는 서버 목록에 있는 항목으로만 올릴 수 있다(없으면 400). 이미 있으면 그대로
             call("POST", "/api/transcription/pipelines", CHOSEN.ref())
@@ -847,32 +1114,30 @@ def run_jobs(a, call, jobs, n_done, n_progress):
     llm = Llm() if a.stage == "all" else None
     spk = {"save": not a.dry_run}   # 화자 분리기·'나'·목소리 저장소(처음 쓸 때 읽음)
     failed = []   # 묶음 하나가 실패해도(GPU 메모리 부족·깨진 파일 등) 나머지는 계속한다(2026-11-12). 다음 실행 때 다시 시도된다
+    flow = run_flow(jobs, call, overlap=llm is None)
     try:
-        for i, b in enumerate(jobs, 1):
-            t0 = time.time()
-            ETA.start_bundle(i - 1)
-            progress("start", i=i, total=len(jobs), **bundle_info(b))
-            used = set()   # 이 묶음에서 실제로 쓴 단어장 항목 id
+        for j, announce in flow:
+            i, b, used = j.i + 1, j.b, j.used
             try:
-                with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:   # 백신·색인기가 임시 파일을 잡고 있어도 멈추지 않게
-                    body = analyze_bundle(b, Path(tmp), llm, spk, a.min_summary_chars, bundle_hints(call, b, Path(tmp)), used)
+                if j.error is not None: raise j.error
+                body = finish_bundle(b, j.wavs, j.parts, llm, spk, a.min_summary_chars, announce, j.diar)
                 if not a.dry_run:
                     call("PUT", "/api/recordings/analysis", body)
             except Exception as e:
                 failed.append(b)
-                ETA.end_bundle(ok=False)
+                ETA.finish(j.i, ok=False)
                 msg = (str(e) or type(e).__name__).strip()
                 print(f"[{i}/{len(jobs)}] {b.source} {hms(b.start)}~{hms(b.end)[6:]}  실패, 건너뜀: {msg[-300:]}", flush=True)
                 progress("error", message=f"{b.source} {hms(b.start)} 묶음 실패(건너뜀): {msg[-200:]}", **bundle_info(b))
                 continue
-            ETA.end_bundle(ok=True)
+            ETA.finish(j.i, ok=True)
             if not a.dry_run: mark_used(call, used)
             segs = body["segments"]
             left = ETA.snapshot()
             print(f"[{i}/{len(jobs)}] {b.source} {hms(b.start)}~{hms(b.end)[6:]}  파일 {len(b.items)}개 {(b.end - b.start) / 1000:.0f}초"
-                  f" → 말 {body['speechMs'] / 1000:.0f}초, {len(segs)}구간 ({time.time() - t0:.1f}초)"
+                  f" → 말 {body['speechMs'] / 1000:.0f}초, {len(segs)}구간 ({time.time() - j.t0:.1f}초)"
                   + (f" · 남은 예상 {E.human(left['remainingSec'])}({left['endsAt'][11:16]} 끝)" if left["remainingSec"] is not None and i < len(jobs) else ""))
-            progress("done", i=i, total=len(jobs), speechMs=body["speechMs"], segments=len(segs), seconds=round(time.time() - t0, 1),
+            progress("done", i=i, total=len(jobs), speechMs=body["speechMs"], segments=len(segs), seconds=round(time.time() - j.t0, 1),
                      uploaded=not a.dry_run, **bundle_info(b))
             if (not a.no_auto_remove and b.source in T.SOURCES and T.is_silent(segs, body["transcript"])
                     and not T.protected({(b.source, it.path.name) for it in b.items}, T.kept(ROOT), load_favorites(call))   # 되살린 것·즐겨찾기(그때 읽음)는 그대로
@@ -890,7 +1155,13 @@ def run_jobs(a, call, jobs, n_done, n_progress):
         print(f"끝: 묶음 {len(jobs) - len(failed)}개 완료, 실패 {len(failed)}개" + (" — " + ", ".join(f"{x.source} {hms(x.start)}" for x in failed[:20]) if failed else ""))
         progress("end", analyzed=len(jobs) - len(failed), total=len(jobs), failed=len(failed))
     finally:
+        flow.close()   # 중단·오류로 나가도 바로 갈래를 멈추고 파이프라인·임시 폴더를 정리(예외의 traceback이 제너레이터를 붙잡아 두지 않게)
         if llm: llm.close()
+
+
+def flow_key() -> str:
+    """예상 시간 기록 열쇠(eta.py Flow): 파이프라인·설정 버전·실행 옵션 + flow(여러 입력이면 multi, 아니면 overlap)"""
+    return E.key(CHOSEN.ref(), {**CHOSEN.run_options, "flow": "multi" if CHOSEN.pipe.multi else "overlap"})
 
 if __name__ == "__main__":
     main()

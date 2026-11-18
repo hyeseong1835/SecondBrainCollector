@@ -471,10 +471,12 @@ class AnalyzeHintsTests(unittest.TestCase):
         self.old = analyze.CHOSEN, analyze.VOCAB_OFF
         analyze.CHOSEN = analyze.Chosen(P.load(WC2), 1, dict(SETTINGS))
         analyze.VOCAB_OFF = False
+        analyze.PICKS.clear()
         self.calls, self.reply = [], None
 
     def tearDown(self):
         self.A.CHOSEN, self.A.VOCAB_OFF = self.old
+        self.A.PICKS.clear()
         self.tmp.cleanup()
 
     def bundle(self, source, name):
@@ -496,6 +498,15 @@ class AnalyzeHintsTests(unittest.TestCase):
         self.reply = {"hints": [], "prompt": "", "fixes": [], "skipped": 0}
         self.assertIsNone(self.A.bundle_hints(self.call, self.bundle("phone", "20261114-130500.m4a"), self.root))   # 고를 것 없음
         self.assertEqual(self.calls[-1][2], {"max": 20, "maxChars": 120})   # 통화가 아니면 caller 없음
+
+    def test_same_body_asked_once(self):
+        """같은 본문(폰 녹음)은 실행 안에서 한 번만 묻고, 본문이 다르면(통화 상대) 따로"""
+        self.reply = {"hints": [{"id": 3, "kind": "name", "text": "김철수"}], "prompt": "김철수", "fixes": [], "skipped": 0}
+        (self.root / "a").mkdir(); (self.root / "b").mkdir()
+        for name, d in (("a.m4a", "a"), ("b.m4a", "b")):
+            self.assertTrue(self.A.bundle_hints(self.call, self.bundle("phone", name), self.root / d).exists())
+        self.A.bundle_hints(self.call, self.bundle("call", "통화 김철수_261114_130500.m4a"), self.root / "a")
+        self.assertEqual([c[2] for c in self.calls], [{"max": 20, "maxChars": 120}, {"caller": "김철수", "max": 20, "maxChars": 120}])
 
     def test_use_hints_off_and_server_fail(self):
         self.A.CHOSEN.settings["useHints"] = False
