@@ -1,7 +1,7 @@
 {
   "type": "collector",
   "id": "win-network",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "네트워크 (Windows)",
   "min_host_version": 1,
   "platforms": [
@@ -14,6 +14,10 @@
     {
       "id": "event:network",
       "required": true
+    },
+    {
+      "id": "event:lan_probe",
+      "required": false
     }
   ],
   "outputs": [
@@ -30,10 +34,31 @@
         "adapter": "text"
       },
       "label": "name",
-      "identity": ["net_key"]
+      "identity": [
+        "net_key"
+      ]
+    },
+    {
+      "name": "probe",
+      "kind": "event",
+      "schema_version": 1,
+      "columns": {
+        "net_key": "text",
+        "gateway_mac": "text",
+        "target": "text",
+        "hops": "jsonb",
+        "aps": "jsonb",
+        "hop_ips": "text",
+        "ap_count": "integer",
+        "wifi": "text"
+      },
+      "label": "hop_ips",
+      "index": [
+        "net_key"
+      ]
     }
   ],
-  "description": "노트북이 붙어 있던 네트워크(와이파이 SSID, 유선은 게이트웨이 MAC)를 구간으로 기록한다. 네트워크마다 폰↔노트북 거리(RSSI)를 이름 붙은 구간(예: 책상 앞·침대·방 밖)으로 나눠 보이는 데 쓴다. 구간은 설정 › 네트워크별 거리 구간에서 정한다.",
+  "description": "노트북이 붙어 있던 네트워크(와이파이 SSID, 유선은 게이트웨이 MAC)를 구간으로 기록한다. 네트워크마다 폰↔노트북 거리(RSSI)를 이름 붙은 구간(예: 책상 앞·침대·방 밖)으로 나눠 보이는 데 쓴다. 구간은 설정 › 네트워크별 거리 구간에서 정한다. 이더넷에 붙어 있으면 공유기 너머 경로(우리 서버까지 몇 홉)와 주변 와이파이 AP를 연결 때·30분마다 재서(probe) 랜선 위치 지문으로 쓴다(서버가 이름 붙인 위치와 맞춘다).",
   "settings": [
     {
       "key": "zones",

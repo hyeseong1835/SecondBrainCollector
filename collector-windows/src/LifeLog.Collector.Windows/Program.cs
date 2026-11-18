@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO.Compression;
 using System.Text.Json;
 using LifeLog.Core;
@@ -96,6 +96,14 @@ static class Cli
                 case "discord-call": return DiscordCli.CallStatus(args[1..]);
                 case "mic-test": return DiscordCli.MicTest(args[1..]);
                 case "network-test": Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(LifeLog.Collector.Windows.Sources.NetworkSource.Read(), new System.Text.Json.JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping })); return 0;
+                case "lan-probe-test":
+                {
+                    // 랜선 위치 지문 측정 한 번(경로·주변 AP). DB와 무관, 읽기만. 주소를 주지 않으면 설정의 API 주소로 경로를 잰다
+                    var url = args.Length > 1 ? args[1] : (Config.Load() is { UsesApi: true } cfg ? cfg.ApiUrl : null);
+                    var ev = new LifeLog.Collector.Windows.Sources.LanProbeSource(url, Console.WriteLine).ProbeNow();
+                    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(ev, new System.Text.Json.JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping, WriteIndented = true }));
+                    return 0;
+                }
                 case "audio-device-test": return AudioDeviceCli.Test(args[1..]);
                 case "bluetooth-test": return await BluetoothCli.Test(args[1..]);
                 case "phone-link-test": return PhoneLinkCli.Test(args[1..]);

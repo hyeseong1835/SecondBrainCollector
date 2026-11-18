@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Nodes;
 using Jint.Native;
 using LifeLog.Collector.Windows.Sources;
@@ -92,7 +92,8 @@ public sealed class Host : IAsyncDisposable
                     if (inst is null) { Log($"[{m.Id}] 설치 행이 없습니다"); continue; }
                     _installs[m.Id] = inst;
                     if (!inst.Enabled) { Log($"[{m.Id}] 꺼져 있음(필수 권한 미허용이거나 사용자가 끔)"); continue; }
-                    var missing = m.Capabilities.Where(c => c.Id.StartsWith("event:") || c.Id.StartsWith("read:"))
+                    // 선택 권한(required false)의 소스는 없어도 된다: 플러그인이 ctx.has로 보고 건너뛴다(2026-11-19 win-network lan_probe)
+                    var missing = m.Capabilities.Where(c => c.Required && (c.Id.StartsWith("event:") || c.Id.StartsWith("read:")))
                         .Select(c => c.Id[(c.Id.IndexOf(':') + 1)..]).Where(s => !KnownSources.Contains(s)).ToList();
                     if (missing.Count > 0) { Log($"[{m.Id}] 이 호스트에 없는 소스: {string.Join(", ", missing)}. 건너뜀"); continue; }
                     var p = new JsPlugin(m, dir, this);
@@ -146,7 +147,7 @@ public sealed class Host : IAsyncDisposable
         while (Queue.Count() > 0 && _uploader.LastError is null) await Task.Delay(500);
     }
 
-    public static readonly HashSet<string> KnownSources = ["window", "idle", "power", "media", "input", "battery", "discord_output", "discord_bot", "laptop_mic", "phone_link", "network", "audio_device", "bluetooth"];
+    public static readonly HashSet<string> KnownSources = ["window", "idle", "power", "media", "input", "battery", "discord_output", "discord_bot", "laptop_mic", "phone_link", "network", "audio_device", "bluetooth", "lan_probe"];
 
     private ISource? CreateSource(string id) => id switch
     {
@@ -161,6 +162,7 @@ public sealed class Host : IAsyncDisposable
         "laptop_mic" => new LaptopMicSource(Log),
         "phone_link" => new PhoneLinkSource(Log),
         "network" => new NetworkSource(),
+        "lan_probe" => new LanProbeSource(Config.UsesApi ? Config.ApiUrl : null, Log),
         "audio_device" => new AudioDeviceSource(Log),
         "bluetooth" => new BluetoothSource(Log),
         _ => null,
