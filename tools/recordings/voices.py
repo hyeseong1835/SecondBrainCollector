@@ -12,6 +12,9 @@ numpy만 쓴다(화자 분리·임베딩은 speakers.py). 목소리 데이터는
     aliases(2026-11-18) = 같은 사람의 다른 이름(디스코드 표시 이름 "청아" → 연락처 이름 "CK 김청아 누나"). 사람이 정한다(set_alias, speakers.py alias).
       정하면 그 별칭으로 등록된 표본의 person을 사람 이름으로 바꾸고, 이후 등록(봇·통화)도 canonical()로 사람 이름에 넣는다.
       통화 이름 기록(2026-11-18, callnames.sync_aliases): 서버 기록에서 한 사람만 가리키는 연락처 이름도 전사 시작 때 별칭으로 맞춘다.
+      사람 id(2026-11-19, persons.sync_aliases): 서버 사람 표의 옛 이름(formerNames, 이름 바꾸기·합치기) → 지금 표시 이름(label)도 별칭으로.
+      '나'는 별칭이 되지 않는다(set_alias가 거절, canonical('나') = '나', 읽을 때 '나' 별칭은 버림). 목소리 '나'는 me.npy·speakers.ME_THRESHOLD로 따로 본다.
+      거꾸로 어떤 이름 → '나'(내 디스코드 이름을 '나'로 이어 등록 막기, speakers.py alias)는 사람이 정할 때만 쓴다(자동 맞추기는 만들지 않음).
   표본 하나 = 768바이트(npy) + 메타 250바이트 안팎(json). 통화 500개면 0.5MB.
   사람의 평균 = 그 사람 표본들의 평균(단위 벡터로)을 읽을 때 계산한다. 표본을 더하거나 지우면 평균이 따라 바뀐다.
   음질 갈래(2026-11-18, grade): 표본 source로 call=전화, discord-*=디스코드, phone·laptop-mic=대면. 같은 사람도 갈래가 다르면 임베딩이 꽤 다르다.
@@ -33,6 +36,12 @@ numpy만 쓴다(화자 분리·임베딩은 speakers.py). 목소리 데이터는
     그 아래면 화자N 그대로. 표본이 하나뿐인 사람·그 갈래 표본이 없어 전체 평균으로 견준 사람은 추정까지만. 한 사람에 두 화자가 걸리면 더 닮은 쪽만.
   모르는 화자(add_unknown): 이름이 안 붙은 화자N(말 MIN_UNKNOWN_SEC 이상)을 표본으로 쌓고, 가장 닮은 묶음(UNKNOWN_SAME 이상)에 넣거나 새 묶음을 만든다.
     unknown_groups = 녹음 둘 이상에 나온 묶음("이 사람 누구?" 후보). confirm_unknown으로 이름을 정하면 그 사람 표본이 된다.
+  목소리 동명이인 신호(2026-11-19, voice_checks): 한 이름의 표본이 서로 닮지 않은 목소리 무리로 갈리면(이름이 같은 다른 사람이 한 이름에 섞임) 알린다.
+    사람마다('나'·화자N 빼고) 음질 갈래별로 따로 본다(갈래가 다르면 같은 사람도 낮게 나온다). 그 갈래 표본이 녹음 둘 이상이어야 한다.
+    ① 표본끼리 평균 연결(voice_groups와 같은 규칙, SAME)로 후보 무리. ② 말이 VOICE_CHECK_MIN_SEC 이상인 무리마다 그 무리 평균과
+    나머지 표본 평균을 견줘 VOICE_CHECK_APART 미만이면 "다른 목소리". 나머지를 한데 모아 견주므로 같은 사람의 잡음 많은 표본이 잘게 갈려도
+    (표본끼리는 0.5 안팎) 나머지 평균과는 닮아 걸리지 않는다. ③ 다른 목소리 무리들 + 남은 표본(말이 기준 이상이면) 한 무리 = 알릴 무리.
+    similarity = 알릴 무리 평균끼리 가장 닮은 값. 임베딩은 내보내지 않는다(녹음 이름·말한 초·유사도만, persons.py가 서버에 올림).
 """
 import datetime as dt, json, os, re
 from pathlib import Path
@@ -52,6 +61,10 @@ GUESS = 0.45             # 이 이상이면 이름 + 추정
 MIN_UNKNOWN_SEC = 5.0
 UNKNOWN_SAME = 0.6       # 모르는 화자 표본끼리 이 이상이면 같은 묶음
 GRADES = {"call": "call", "phone": "face", "laptop-mic": "face"}   # 원천 → 음질 갈래. discord-*는 "discord"
+# 목소리 동명이인 신호(voice_checks, 2026-11-19). 실제 동명이인 표본으로 맞춘 값이 아니다: python speakers.py voice-checks로 유사도를 보고 다시 맞춘다
+VOICE_CHECK_MIN_SEC = MIN_ENROLL_SEC   # 무리가 이만큼은 말해야 한 목소리로 본다(통화 하나 등록 기준과 같다. 라벨 표본 3초짜리 하나로는 안 걸림)
+VOICE_CHECK_APART = CONSISTENT         # 무리 평균과 나머지 평균이 이 미만이면 다른 목소리(등록 때 "기존 목소리와 다름"과 같은 기준)
+AUTO_NAME = re.compile(r"화자\d+")     # 이름 안 붙은 화자(name_clusters의 화자N)
 
 
 def grade(source) -> str | None:
@@ -88,6 +101,7 @@ class Store:
             self.samples = d.get("samples", [])
             self.next_id, self.next_cluster = d.get("nextId", len(self.samples) + 1), d.get("nextCluster", 1)
             self.aliases = dict(d.get("aliases") or {})
+            self.aliases.pop(ME_NAME, None)   # '나'는 별칭이 될 수 없다(set_alias 막기 전에 생긴 것은 버림)
             self.emb = np.load(n).astype(np.float32) if n.exists() else np.zeros((0, DIM), np.float32)
             k = min(len(self.samples), len(self.emb))
             self.samples, self.emb = self.samples[:k], self.emb[:k]
@@ -131,12 +145,14 @@ class Store:
 
     # ---- 별칭 ----
     def canonical(self, name):
-        """별칭이면 사람 이름, 아니면 그대로"""
-        return self.aliases.get(name, name) if name else name
+        """별칭이면 사람 이름, 아니면 그대로. '나'는 늘 '나'"""
+        return self.aliases.get(name, name) if name and name != ME_NAME else name
 
     def set_alias(self, alias: str, person: str) -> int:
-        """별칭을 정한다. 그 별칭으로 등록된 표본은 사람 이름으로 옮긴다(display는 남김). 그 별칭을 가리키던 다른 별칭도 사람 이름으로. → 옮긴 표본 수"""
+        """별칭을 정한다. 그 별칭으로 등록된 표본은 사람 이름으로 옮긴다(display는 남김). 그 별칭을 가리키던 다른 별칭도 사람 이름으로. → 옮긴 표본 수
+        '나'를 다른 이름의 별칭으로 접지 않는다(ValueError). 이름 → '나'는 사람이 정할 때만(자동 맞추기 callnames·persons는 건너뜀)"""
         if not alias or not person or alias == person: raise ValueError("별칭과 사람 이름이 같거나 비었다")
+        if alias == ME_NAME: raise ValueError("'나'는 다른 이름으로 합치지 않는다(목소리 '나'는 me.npy로 따로 본다)")
         person = self.canonical(person)
         if person == alias: raise ValueError(f"{alias}: 별칭이 돌고 돈다")
         self.aliases[alias] = person
@@ -425,3 +441,77 @@ def confirm_unknown(store: Store, cluster: int, person: str) -> int:
         if s["person"] is None and s.get("cluster") == cluster:
             s["person"] = person; s["confirmed"] = True; s.pop("cluster", None); s.pop("label", None); n += 1
     return n
+
+
+# ---- 목소리 동명이인 신호 ----
+
+def link(sim, threshold=SAME) -> list:
+    """평균 연결 응집(voice_groups와 같은 규칙)을 미리 구한 유사도 행렬로: 무리 쌍의 평균 유사도가 threshold 이상인 동안 가장 닮은 쌍부터 합친다.
+    표본이 수백 개인 사람도 빨리 돌게 무리 쌍의 유사도 합을 행렬로 들고 다닌다. → [[행 번호…]]"""
+    n = len(sim)
+    groups = [[i] for i in range(n)]
+    tot = np.array(sim, dtype=np.float64).reshape(n, n)   # 무리 쌍의 표본 유사도 합
+    size, alive = np.ones(n), np.ones(n, bool)
+    upper = np.triu(np.ones((n, n), bool), 1)
+    while True:
+        avg = np.where(upper & np.outer(alive, alive), tot / np.outer(size, size), -np.inf)
+        a, b = np.unravel_index(int(np.argmax(avg)), avg.shape) if n else (0, 0)
+        if not n or not avg[a, b] >= threshold: break
+        groups[a] += groups[b]; groups[b] = []
+        tot[a, :] += tot[b, :]; tot[:, a] += tot[:, b]
+        size[a] += size[b]; alive[b] = False
+    return [g for g in groups if g]
+
+
+def _sec(store: Store, rows) -> float:
+    return sum(float(store.samples[i].get("sec") or 0) for i in rows)
+
+
+def _mean(store: Store, rows):
+    return unit(store.emb[rows].mean(axis=0))
+
+
+def _split(store: Store, rows: list, min_sec: float, apart: float):
+    """한 사람·한 음질 갈래의 표본 행 → (알릴 무리들 [[행…]], 무리 평균끼리 가장 닮은 값) 또는 None(한 목소리)"""
+    if len({store.samples[i].get("file") for i in rows}) < 2: return None
+    e = store.emb[rows]
+    cand = [[rows[j] for j in g] for g in link(e @ e.T, SAME)]
+    apart_groups = []
+    for g in cand:
+        gs = set(g)
+        rest = [i for i in rows if i not in gs]
+        if _sec(store, g) < min_sec or _sec(store, rest) < min_sec: continue
+        if float(_mean(store, g) @ _mean(store, rest)) < apart: apart_groups.append(g)
+    if not apart_groups: return None
+    taken = {i for g in apart_groups for i in g}
+    left = [i for i in rows if i not in taken]
+    groups = apart_groups + ([left] if left and _sec(store, left) >= min_sec else [])
+    if len(groups) < 2 or len({store.samples[i].get("file") for g in groups for i in g}) < 2: return None
+    means = np.array([_mean(store, g) for g in groups])
+    x = means @ means.T
+    np.fill_diagonal(x, -np.inf)
+    return sorted(groups, key=lambda g: -_sec(store, g)), float(x.max())
+
+
+def voice_checks(store: Store, min_sec=VOICE_CHECK_MIN_SEC, apart=VOICE_CHECK_APART) -> list:
+    """한 이름의 표본이 서로 닮지 않은 목소리 무리로 갈린 사람들(머리말 "목소리 동명이인 신호"). '나'·화자N은 보지 않는다.
+    → [{person, samples(그 사람 표본 수), files(녹음 수), similarity, groups: [{files: [녹음…], sec}]}] 덜 닮은 순.
+    음질 갈래 여럿에서 걸리면 무리를 모두 담고 similarity는 갈래별 값 중 큰 것. personId는 부르는 쪽(persons.py)이 붙인다"""
+    out = []
+    for name in dict.fromkeys(s["person"] for s in store.samples if s["person"]):
+        if name == ME_NAME or AUTO_NAME.fullmatch(name): continue
+        rows = store.rows(name)
+        by_grade = {}
+        for i in rows: by_grade.setdefault(grade(store.samples[i].get("source")), []).append(i)
+        groups, best = [], None
+        for g_rows in by_grade.values():
+            got = _split(store, g_rows, min_sec, apart)
+            if got is None: continue
+            groups += got[0]
+            best = got[1] if best is None else max(best, got[1])
+        if not groups: continue
+        out.append({"person": name, "samples": len(rows), "files": len({store.samples[i].get("file") for i in rows}),
+                    "similarity": round(best, 3),
+                    "groups": [{"files": sorted({store.samples[i]["file"] for i in g if store.samples[i].get("file")}), "sec": round(_sec(store, g), 1)}
+                               for g in groups]})
+    return sorted(out, key=lambda it: (it["similarity"], it["person"]))
