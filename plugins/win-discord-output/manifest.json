@@ -1,7 +1,7 @@
 {
   "type": "collector",
   "id": "win-discord-output",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "name": "디스코드 출력 녹음 (Windows)",
   "min_host_version": 1,
   "platforms": [
@@ -46,6 +46,14 @@
       "label": "녹음할 출력 장치",
       "description": "디스코드의 출력 장치로 고른 장치(예: CABLE Input). 비우면 녹음하지 않는다. 장치 ID로 저장한다.",
       "x-picker": "audio-output"
+    },
+    {
+      "key": "output_device_name",
+      "type": "string",
+      "default": "",
+      "label": "녹음 장치 이름(내부)",
+      "description": "호스트가 실제로 연 장치의 이름을 적어 둔다. 드라이버를 다시 깔아 장치 ID가 바뀌면 이 이름으로 다시 찾는다. 화면에는 보이지 않는다.",
+      "x-ui": "hidden"
     }
   ]
 }
